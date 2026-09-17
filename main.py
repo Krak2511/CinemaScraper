@@ -114,7 +114,7 @@ def fetch_live_movies():
 
         # Force English interface by clicking language switch icon if present
         try:
-            lang_btn = page.query_selector("div.cursor-pointer:has-text('中')")
+            lang_btn = page.query_selector("div.cursor-pointer:has-text('En')")
             if lang_btn:
                 lang_btn.click()
                 page.wait_for_timeout(2000)
