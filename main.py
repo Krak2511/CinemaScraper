@@ -1,76 +1,73 @@
 import json
 import re
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+
+URL = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
+
+# Standard non-movie promotional tags to ignore
+PROMO_KEYWORDS = [
+    r"macau\d+",
+    r"mop\s*\d+",
+    r"promo",
+    r"yummy box",
+    r"special offer",
+    r"popcorn",
+]
 
 
-def parse_movies(html_content):
-    soup = BeautifulSoup(html_content, "html.parser")
-
-    # Standard non-movie promotional tags to ignore
-    promo_keywords = [
-        r"macau\d+",
-        r"mop\s*\d+",
-        r"promo",
-        r"yummy box",
-        r"special offer",
-        r"popcorn",
-    ]
-
-    def is_movie_title(text):
-        if not text:
+def is_movie_title(text):
+    if not text:
+        return False
+    clean_text = text.replace("Emperor Cinemas:", "").strip()
+    for pattern in PROMO_KEYWORDS:
+        if re.search(pattern, clean_text, re.IGNORECASE):
             return False
-        # Clean prefix if scraped as "Emperor Cinemas: Movie Title"
-        clean_text = text.replace("Emperor Cinemas:", "").strip()
-        # Check against promo keywords
-        for pattern in promo_keywords:
-            if re.search(pattern, clean_text, re.IGNORECASE):
-                return False
-        return len(clean_text) > 0
+    return len(clean_text) > 0
 
+
+def fetch_live_movies():
     now_showing = []
     coming_soon = []
 
-    # Target movie containers in Emperor Cinemas' DOM structure
-    movie_cards = soup.find_all(
-        ["div", "a"],
-        class_=lambda c: c
-        and ("film" in c or "movie" in c or "card" in c or "item" in c),
-    )
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-    for card in movie_cards:
-        # Extract title text
-        title_el = card.find(
-            ["h2", "h3", "h4", "div", "span"],
-            class_=lambda c: c and ("title" in c or "name" in c),
+        page.goto(URL, wait_until="domcontentloaded")
+        page.wait_for_selector(".line-clamp-6", timeout=20000)
+
+        # Target the titles based on the live Tailwind structure
+        title_elements = page.query_selector_all(
+            "div.hover-mask div.line-clamp-6.text-ellipsis"
         )
-        title = title_el.get_text(strip=True) if title_el else card.get_text(strip=True)
 
-        if title and is_movie_title(title):
-            formatted_title = (
-                f"Emperor Cinemas: {title.replace('Emperor Cinemas:', '').strip()}"
-            )
+        for el in title_elements:
+            raw_title = el.inner_text().strip()
 
-            # Determine section based on parent block/attributes
-            parent_text = (
-                card.find_parent(
-                    ["section", "div"],
-                    class_=lambda c: c and ("soon" in c or "showing" in c),
+            if is_movie_title(raw_title):
+                clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
+                formatted_title = f"Emperor Cinemas: {clean_title}"
+
+                # Simple check to classify coming soon vs now showing based on element scope
+                is_coming_soon = el.evaluate(
+                    """node => {
+                    const parent = node.closest('[class*="soon"], [id*="soon"]');
+                    return parent !== null;
+                }"""
                 )
-                or ""
-            )
 
-            if "soon" in str(parent_text).lower():
-                if formatted_title not in coming_soon:
-                    coming_soon.append(formatted_title)
-            else:
-                if formatted_title not in now_showing:
-                    now_showing.append(formatted_title)
+                if is_coming_soon:
+                    if formatted_title not in coming_soon:
+                        coming_soon.append(formatted_title)
+                else:
+                    if formatted_title not in now_showing:
+                        now_showing.append(formatted_title)
+
+        browser.close()
 
     return {"coming_soon": coming_soon, "now_showing": now_showing}
 
 
-# Load your saved HTML file and process
-with open("Emperor Cinemas_2.html", "r", encoding="utf-8") as f:
-    data = parse_movies(f.read())
-
-print(json.dumps(data, indent=2, ensure_ascii=False))
+if __name__ == "__main__":
+    data = fetch_live_movies()
+    print(json.dumps(data, indent=2, ensure_ascii=False))
