@@ -102,6 +102,40 @@ def save_seen_movies(seen_data):
         os.fsync(f.fileno())
 
 
+def build_discord_fields(section_title, titles, max_len=1000):
+    """Splits movie lists into multiple fields to avoid exceeding Discord's 
+    1,024-character field limit per field value."""
+    fields = []
+    current_lines = []
+    current_length = 0
+    part = 1
+
+    for title in titles:
+        line = f"• {title}"
+        # +1 for newline character
+        if current_length + len(line) + 1 > max_len:
+            field_name = section_title if part == 1 else f"{section_title} (Contd. {part})"
+            fields.append({
+                "name": field_name,
+                "value": "\n".join(current_lines)
+            })
+            current_lines = [line]
+            current_length = len(line)
+            part += 1
+        else:
+            current_lines.append(line)
+            current_length += len(line) + 1
+
+    if current_lines:
+        field_name = section_title if part == 1 else f"{section_title} (Contd. {part})"
+        fields.append({
+            "name": field_name,
+            "value": "\n".join(current_lines)
+        })
+
+    return fields
+
+
 def send_discord_notification(new_now_showing, new_coming_soon):
     if not DISCORD_WEBHOOK_URL:
         print("[Warning] DISCORD_WEBHOOK_URL environment variable is NOT set.")
@@ -109,30 +143,21 @@ def send_discord_notification(new_now_showing, new_coming_soon):
 
     fields = []
     if new_now_showing:
-        fields.append(
-            {
-                "name": "🎬 New Now Showing",
-                "value": "\n".join([f"• {title}" for title in new_now_showing]),
-            }
-        )
+        fields.extend(build_discord_fields("🎬 New Now Showing", new_now_showing))
 
     if new_coming_soon:
-        fields.append(
-            {
-                "name": "⏳ New Coming Soon",
-                "value": "\n".join([f"• {title}" for title in new_coming_soon]),
-            }
-        )
+        fields.extend(build_discord_fields("⏳ New Coming Soon", new_coming_soon))
 
     if not fields:
         return
 
+    # Discord embeds allow up to 25 fields max
     payload = {
         "embeds": [
             {
                 "title": "🎭 New Movies Detected!",
                 "color": 3447003,
-                "fields": fields,
+                "fields": fields[:25],  # Cap at 25 fields to satisfy Discord limits
             }
         ]
     }
