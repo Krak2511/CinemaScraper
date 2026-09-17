@@ -95,59 +95,56 @@ def send_discord_notification(new_now_showing, new_coming_soon):
         print(f"[Error] Failed to execute Discord request: {e}")
 
 
+def scrape_titles_from_page(page):
+    """Extract titles currently loaded in the DOM."""
+    titles = []
+    elements = page.query_selector_all(
+        "div.hover-mask div.line-clamp-6.text-ellipsis"
+    )
+    for el in elements:
+        raw_title = el.inner_text().strip()
+        if is_movie_title(raw_title):
+            clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
+            formatted_title = f"Emperor Cinemas: {clean_title}"
+            if formatted_title not in titles:
+                titles.append(formatted_title)
+    return titles
+
+
 def fetch_live_movies():
     now_showing = []
     coming_soon = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            locale="en-US",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-
+        context = browser.new_context()
         page = context.new_page()
-        page.goto(URL, wait_until="domcontentloaded")
 
-        # Wait for dynamic elements to render
+        page.goto(URL, wait_until="domcontentloaded")
         page.wait_for_selector(".line-clamp-6", timeout=20000)
 
-        # Force English interface by clicking language switch icon if present
+        # 1. Switch language to English if 'En' toggle is found
         try:
-            lang_btn = page.query_selector("div.cursor-pointer:has-text('En')")
-            if lang_btn:
-                lang_btn.click()
+            en_btn = page.query_selector("div.cursor-pointer:has-text('En')")
+            if en_btn:
+                en_btn.click()
                 page.wait_for_timeout(2000)
-        except Exception:
-            pass
+                page.wait_for_selector(".line-clamp-6", timeout=10000)
+        except Exception as e:
+            print(f"[Warning] Could not click language toggle: {e}")
 
-        # Scrape titles currently rendered in the active DOM tab
-        title_elements = page.query_selector_all(
-            "div.hover-mask div.line-clamp-6.text-ellipsis"
-        )
+        # 2. Extract 'Now Showing' titles from active tab
+        now_showing = scrape_titles_from_page(page)
 
-        for el in title_elements:
-            raw_title = el.inner_text().strip()
-
-            if is_movie_title(raw_title):
-                clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
-                formatted_title = f"Emperor Cinemas: {clean_title}"
-
-                # Separate titles based on DOM section or fall back to default bucket
-                is_coming_soon = el.evaluate(
-                    """node => {
-                    const textContent = document.body.innerText.lowerCase;
-                    const section = node.closest('section, div[class*="content"]');
-                    return section ? section.innerText.includes("Coming Soon") : false;
-                }"""
-                )
-
-                if is_coming_soon:
-                    if formatted_title not in coming_soon:
-                        coming_soon.append(formatted_title)
-                else:
-                    if formatted_title not in now_showing:
-                        now_showing.append(formatted_title)
+        # 3. Click 'Coming Soon' tab explicitly
+        try:
+            coming_soon_tab = page.query_selector("text=/Coming Soon|即將上映/")
+            if coming_soon_tab:
+                coming_soon_tab.click()
+                page.wait_for_timeout(2000)
+                coming_soon = scrape_titles_from_page(page)
+        except Exception as e:
+            print(f"[Warning] Could not switch to Coming Soon tab: {e}")
 
         browser.close()
 
@@ -158,7 +155,7 @@ if __name__ == "__main__":
     current_data = fetch_live_movies()
     seen_data = load_seen_movies()
 
-    # Determine differences
+    # Calculate differences against saved state
     new_now_showing = [
         m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
     ]
@@ -167,17 +164,17 @@ if __name__ == "__main__":
     ]
 
     print(
-        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' movies."
+        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' titles."
     )
 
     if new_now_showing or new_coming_soon:
         print(
-            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
+            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' movies."
         )
         send_discord_notification(new_now_showing, new_coming_soon)
     else:
-        print("No new movies found since last check.")
+        print("No new movies found since last run.")
 
-    # Overwrite seen_movies.json with the freshly parsed structure
+    # Always update seen_movies.json with fresh state
     save_seen_movies(current_data)
     print("Updated seen_movies.json successfully.")
