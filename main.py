@@ -74,7 +74,7 @@ def is_movie_title(text):
     if not text:
         return False
     clean_text = (
-        text.replace("Emperor Cinemas:", "")
+        text.replace("Emperor:", "")
         .replace("MCL:", "")
         .replace("Broadway:", "")
         .strip()
