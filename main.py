@@ -1,349 +1,263 @@
 import json
-import os
 import re
+import asyncio
+from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 import requests
-from playwright.sync_api import sync_playwright
 
-# URLs
-EMPEROR_URL = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS&lang=en-US"
-MCL_NOW_SHOWING_URL = "https://www.mclcinema.com/NowShowing.aspx?visLang=2"
-MCL_COMING_SOON_URL = "https://www.mclcinema.com/ComingSoon.aspx?visLang=2"
-BROADWAY_NOW_SHOWING_URL = "https://www.cinema.com.hk/en/movie/ticketing"
-BROADWAY_COMING_SOON_URL = "https://www.cinema.com.hk/en/movie/upcoming"
-
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-SEEN_MOVIES_FILE = "seen_movies.json"
-
-PROMO_KEYWORDS = [
-    r"macau\d+",
-    r"mop\s*\d+",
-    r"promo",
-    r"yummy box",
-    r"special offer",
-    r"popcorn",
-]
-
-# Words to keep lowercase unless they appear at the start or end of a title
-LOWERCASE_WORDS = {
-    "a", "an", "and", "as", "at", "but", "by", "for", "from",
-    "in", "into", "like", "near", "of", "off", "on", "onto",
-    "or", "out", "over", "the", "to", "up", "upon", "with"
-}
-
-# Standard tech/cinema terms to preserve uppercase
-PRESERVE_UPPERCASE = {"IMAX", "4DX", "CGS", "3D", "2D", "BTS"}
-
-
-def to_title_case(text):
-    """Formats text to Proper Title Case while keeping prepositions lowercase 
-    and preserving cinema acronyms (IMAX, 4DX, CGS, BTS, etc.)."""
-    if not text:
-        return ""
-
-    words = re.findall(r"[\w']+|[^\w\s]", text)
-    formatted_words = []
-
-    for i, word in enumerate(words):
-        upper_word = word.upper()
-        clean_word = word.lower()
-
-        if upper_word in PRESERVE_UPPERCASE:
-            formatted_words.append(upper_word)
-        elif not word.isalnum():
-            formatted_words.append(word)
-        elif i == 0 or i == len(words) - 1:
-            formatted_words.append(word.capitalize())
-        elif clean_word in LOWERCASE_WORDS:
-            formatted_words.append(clean_word)
-        else:
-            formatted_words.append(word.capitalize())
-
-    result = ""
-    for token in formatted_words:
-        if token in "':-–—!?,.()[]":
-            result = result.rstrip() + token
-        elif result and result[-1] in "([{":
-            result += token
-        else:
-            result = f"{result} {token}".strip() if result else token
-
-    return result
-
-
-def is_movie_title(text):
-    if not text:
-        return False
-    clean_text = (
-        text.replace("Emperor Cinemas:", "")
-        .replace("MCL:", "")
-        .replace("Broadway:", "")
-        .strip()
-    )
-    for pattern in PROMO_KEYWORDS:
-        if re.search(pattern, clean_text, re.IGNORECASE):
-            return False
-    return len(clean_text) > 0
-
-
-def load_seen_movies():
-    if os.path.exists(SEEN_MOVIES_FILE):
-        try:
-            with open(SEEN_MOVIES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"now_showing": [], "coming_soon": []}
-
-
-def save_seen_movies(seen_data):
-    with open(SEEN_MOVIES_FILE, "w", encoding="utf-8") as f:
-        json.dump(seen_data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def build_discord_fields(section_title, titles, max_len=900):
-    """Splits movie lists into standard fields that stay safely under 1,024 chars."""
-    fields = []
-    current_lines = []
-    current_length = 0
-    part = 1
-
-    for title in titles:
-        line = f"• {title}"
-        if current_length + len(line) + 1 > max_len:
-            field_name = section_title if part == 1 else f"{section_title} (Part {part})"
-            fields.append({
-                "name": field_name,
-                "value": "\n".join(current_lines)
-            })
-            current_lines = [line]
-            current_length = len(line)
-            part += 1
-        else:
-            current_lines.append(line)
-            current_length += len(line) + 1
-
-    if current_lines:
-        field_name = section_title if part == 1 else f"{section_title} (Part {part})"
-        fields.append({
-            "name": field_name,
-            "value": "\n".join(current_lines)
-        })
-
-    return fields
-
-
-def send_discord_notification(new_now_showing, new_coming_soon):
-    if not DISCORD_WEBHOOK_URL:
-        print("[Warning] DISCORD_WEBHOOK_URL environment variable is NOT set.")
-        return
-
-    all_fields = []
-    if new_now_showing:
-        all_fields.extend(build_discord_fields("🎬 New Now Showing", new_now_showing))
-
-    if new_coming_soon:
-        all_fields.extend(build_discord_fields("⏳ New Coming Soon", new_coming_soon))
-
-    if not all_fields:
-        return
-
-    # Chunk fields across multiple Discord messages to stay well under the 6,000 char total limit per embed
-    MAX_CHAR_PER_PAYLOAD = 4500
-    payload_batches = []
+# ------------------------------------------------------------------------------
+# 1. BROADWAY CINEMA
+# ------------------------------------------------------------------------------
+def get_broadway_movies():
+    base_url = "https://www.cinema.com.hk"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     
-    current_batch = []
-    current_length = 0
+    now_showing_url = f"{base_url}/en/movie/nowshowing"
+    coming_soon_url = f"{base_url}/en/movie/comingsoon"
 
-    for field in all_fields:
-        field_size = len(field["name"]) + len(field["value"])
-        if current_length + field_size > MAX_CHAR_PER_PAYLOAD or len(current_batch) >= 10:
-            payload_batches.append(current_batch)
-            current_batch = [field]
-            current_length = field_size
-        else:
-            current_batch.append(field)
-            current_length += field_size
+    def scrape_broadway_page(url):
+        movies = []
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                print(f"Broadway: Failed to fetch {url} (Status {resp.status_code})")
+                return movies
+            
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            movie_nodes = soup.find_all('div', class_='movie-info')
+            if not movie_nodes:
+                movie_nodes = soup.find_all('div', class_=re.compile(r'movie', re.I))
 
-    if current_batch:
-        payload_batches.append(current_batch)
+            for node in movie_nodes:
+                title_elem = node.find(['h2', 'h3', 'h4', 'div', 'a'], class_=re.compile(r'title|name', re.I))
+                if not title_elem:
+                    title_elem = node.find('a')
+                
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if title and title not in [m['title'] for m in movies]:
+                        link = title_elem.get('href', '')
+                        if link and not link.startswith('http'):
+                            link = base_url + link
+                        
+                        img_elem = node.find('img')
+                        poster = img_elem.get('src', '') if img_elem else ''
+                        if poster and not poster.startswith('http'):
+                            poster = base_url + poster
 
-    total_batches = len(payload_batches)
-    for index, batch in enumerate(payload_batches, 1):
-        title = "🎭 New Movies Detected!"
-        if total_batches > 1:
-            title += f" ({index}/{total_batches})"
+                        movies.append({
+                            "title": title,
+                            "link": link,
+                            "poster": poster
+                        })
+        except Exception as e:
+            print(f"Error scraping Broadway URL {url}: {e}")
+        return movies
 
-        payload = {
-            "embeds": [
-                {
-                    "title": title,
-                    "color": 3447003,
-                    "fields": batch,
-                }
-            ]
-        }
+    return {
+        "now_showing": scrape_broadway_page(now_showing_url),
+        "coming_soon": scrape_broadway_page(coming_soon_url)
+    }
+
+
+# ------------------------------------------------------------------------------
+# 2. MCL CINEMA
+# ------------------------------------------------------------------------------
+def get_mcl_movies():
+    base_url = "https://www.mclcinema.com"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    
+    now_showing_url = f"{base_url}/Movie.aspx?vis=1&lang=en"
+    coming_soon_url = f"{base_url}/Movie.aspx?vis=2&lang=en"
+
+    def scrape_mcl_page(url):
+        movies = []
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                print(f"MCL: Failed to fetch {url} (Status {resp.status_code})")
+                return movies
+
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            movie_items = soup.find_all('div', class_=re.compile(r'movie-item|movieBox|film', re.I))
+            if not movie_items:
+                movie_items = soup.find_all('a', href=re.compile(r'MovieDetail', re.I))
+
+            for item in movie_items:
+                title = ""
+                link = ""
+                poster = ""
+
+                if item.name == 'a':
+                    link = item.get('href', '')
+                    title = item.get_text(strip=True)
+                    img = item.find('img')
+                    if img:
+                        poster = img.get('src', '')
+                else:
+                    title_elem = item.find(['div', 'span', 'h3', 'a'], class_=re.compile(r'title|name', re.I))
+                    if title_elem:
+                        title = title_elem.get_text(strip=True)
+                    
+                    link_elem = item.find('a', href=re.compile(r'MovieDetail', re.I))
+                    if link_elem:
+                        link = link_elem.get('href', '')
+                        if not title:
+                            title = link_elem.get_text(strip=True)
+                    
+                    img_elem = item.find('img')
+                    if img_elem:
+                        poster = img_elem.get('src', '')
+
+                if title:
+                    if link and not link.startswith('http'):
+                        link = base_url + ('/' if not link.startswith('/') else '') + link
+                    if poster and not poster.startswith('http'):
+                        poster = base_url + ('/' if not poster.startswith('/') else '') + poster
+
+                    if title not in [m['title'] for m in movies]:
+                        movies.append({
+                            "title": title,
+                            "link": link,
+                            "poster": poster
+                        })
+        except Exception as e:
+            print(f"Error scraping MCL URL {url}: {e}")
+        return movies
+
+    return {
+        "now_showing": scrape_mcl_page(now_showing_url),
+        "coming_soon": scrape_mcl_page(coming_soon_url)
+    }
+
+
+# ------------------------------------------------------------------------------
+# 3. EMPEROR CINEMAS (Playwright implementation with dynamic tab switching)
+# ------------------------------------------------------------------------------
+async def get_emperor_movies_async():
+    url = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
+    
+    now_showing_movies = []
+    coming_soon_movies = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+
+        def parse_movies_from_html(html_content):
+            soup = BeautifulSoup(html_content, 'html.parser')
+            parsed = []
+            
+            # Common film card containers on Emperor Cinemas web page
+            film_cards = soup.find_all('div', class_=re.compile(r'film-card|movie-card|filmItem|_', re.I))
+            if not film_cards:
+                film_cards = soup.find_all('a', href=re.compile(r'/film/', re.I))
+
+            for card in film_cards:
+                title = ""
+                link = ""
+                poster = ""
+
+                # Try title parsing
+                title_node = card.find(class_=re.compile(r'title|name|film-name', re.I))
+                if title_node:
+                    title = title_node.get_text(strip=True)
+
+                link_node = card if card.name == 'a' else card.find('a', href=True)
+                if link_node:
+                    link = link_node.get('href', '')
+                    if not title:
+                        title = link_node.get_text(strip=True)
+
+                img_node = card.find('img')
+                if img_node:
+                    poster = img_node.get('src') or img_node.get('data-src') or ''
+
+                if title and len(title) > 1:
+                    if link and not link.startswith('http'):
+                        link = "https://www.emperorcinemas.com" + ('/' if not link.startswith('/') else '') + link
+                    if poster and not poster.startswith('http'):
+                        poster = "https://www.emperorcinemas.com" + ('/' if not poster.startswith('/') else '') + poster
+
+                    if title not in [m['title'] for m in parsed]:
+                        parsed.append({
+                            "title": title,
+                            "link": link,
+                            "poster": poster
+                        })
+            return parsed
 
         try:
-            response = requests.post(
-                DISCORD_WEBHOOK_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-            if response.status_code in (200, 204):
-                print(f"Successfully delivered Discord notification chunk {index}/{total_batches}!")
+            # Load the main page (defaults to Now Showing)
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(2000)
+
+            # 1. Scrape NOW SHOWING
+            content_now_showing = await page.content()
+            now_showing_movies = parse_movies_from_html(content_now_showing)
+
+            # 2. Click "COMING SOON" tab to fetch coming soon movies
+            coming_soon_button = page.locator('div[data-text="COMING SOON"]').or_(page.locator('button:has-text("COMING SOON")'))
+            
+            if await coming_soon_button.count() > 0:
+                await coming_soon_button.first.click()
+                await page.wait_for_timeout(2000)
+                await page.wait_for_load_state("networkidle")
+
+                content_coming_soon = await page.content()
+                coming_soon_movies = parse_movies_from_html(content_coming_soon)
             else:
-                print(f"[Error] Discord API status {response.status_code}: {response.text}")
+                print("Emperor Cinemas: 'COMING SOON' button not found on page.")
+
         except Exception as e:
-            print(f"[Error] Failed to execute Discord request: {e}")
+            print(f"Error scraping Emperor Cinemas via Playwright: {e}")
+
+        await browser.close()
+
+    return {
+        "now_showing": now_showing_movies,
+        "coming_soon": coming_soon_movies
+    }
 
 
-def fetch_emperor_movies(page):
-    now_showing = []
-    page.goto(EMPEROR_URL, wait_until="domcontentloaded", timeout=60000)
-
-    try:
-        page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
-        title_elements = page.query_selector_all(
-            "div.hover-mask div.line-clamp-6.text-ellipsis"
-        )
-
-        for el in title_elements:
-            raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
-                clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
-                formatted_title = f"Emperor Cinemas: {to_title_case(clean_title)}"
-                if formatted_title not in now_showing:
-                    now_showing.append(formatted_title)
-    except Exception as e:
-        print(f"[Error] Failed scraping Emperor Cinemas: {e}")
-
-    return now_showing
+def get_emperor_movies():
+    return asyncio.run(get_emperor_movies_async())
 
 
-def fetch_mcl_movies(page, url, prefix="MCL:"):
-    movies = []
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+# ------------------------------------------------------------------------------
+# MAIN ENTRYPOINT
+# ------------------------------------------------------------------------------
+def main():
+    print("Fetching Broadway Cinemas...")
+    broadway_data = get_broadway_movies()
 
-    try:
-        page.wait_for_selector(".movies-container .movie-container mark", state="attached", timeout=20000)
-        title_elements = page.query_selector_all(
-            ".movies-container .movie-container mark"
-        )
+    print("Fetching MCL Cinemas...")
+    mcl_data = get_mcl_movies()
 
-        for el in title_elements:
-            raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
-                formatted_title = f"{prefix} {to_title_case(raw_title)}"
-                if formatted_title not in movies:
-                    movies.append(formatted_title)
-    except Exception as e:
-        print(f"[Error] Failed scraping MCL url ({url}): {e}")
+    print("Fetching Emperor Cinemas...")
+    emperor_data = get_emperor_movies()
 
-    return movies
+    result = {
+        "broadway": broadway_data,
+        "mcl": mcl_data,
+        "emperor": emperor_data
+    }
 
+    # Print or save result JSON
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
-def fetch_broadway_now_showing(page):
-    now_showing = []
-    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
-
-    try:
-        page.wait_for_selector("#mobile-movie-show p.font-semibold", state="attached", timeout=20000)
-        title_elements = page.query_selector_all(
-            "#mobile-movie-show a div p.font-semibold"
-        )
-
-        for el in title_elements:
-            raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
-                formatted_title = f"Broadway: {to_title_case(raw_title)}"
-                if formatted_title not in now_showing:
-                    now_showing.append(formatted_title)
-    except Exception as e:
-        print(f"[Error] Failed scraping Broadway Now Showing: {e}")
-
-    return now_showing
-
-
-def fetch_broadway_coming_soon(page):
-    coming_soon = []
-    page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
-
-    try:
-        page.wait_for_selector("a[href*='/en/movie/'] img[alt]", state="attached", timeout=20000)
-        img_elements = page.query_selector_all("a[href*='/en/movie/'] img[alt]")
-
-        for el in img_elements:
-            raw_title = el.get_attribute("alt")
-            if raw_title:
-                raw_title = raw_title.strip()
-                if is_movie_title(raw_title):
-                    formatted_title = f"Broadway: {to_title_case(raw_title)}"
-                    if formatted_title not in coming_soon:
-                        coming_soon.append(formatted_title)
-    except Exception as e:
-        print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
-
-    return coming_soon
-
-
-def fetch_all_live_movies():
-    now_showing = []
-    coming_soon = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-
-        # 1. Fetch Emperor Cinemas
-        emperor_movies = fetch_emperor_movies(page)
-        now_showing.extend(emperor_movies)
-
-        # 2. Fetch MCL Now Showing
-        mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
-        now_showing.extend(mcl_now)
-
-        # 3. Fetch MCL Coming Soon
-        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
-        coming_soon.extend(mcl_soon)
-
-        # 4. Fetch Broadway Now Showing
-        broadway_now = fetch_broadway_now_showing(page)
-        now_showing.extend(broadway_now)
-
-        # 5. Fetch Broadway Coming Soon
-        broadway_soon = fetch_broadway_coming_soon(page)
-        coming_soon.extend(broadway_soon)
-
-        browser.close()
-
-    return {"coming_soon": coming_soon, "now_showing": now_showing}
+    with open("movies.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":
-    current_data = fetch_all_live_movies()
-    seen_data = load_seen_movies()
-
-    new_now_showing = [
-        m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
-    ]
-    new_coming_soon = [
-        m for m in current_data["coming_soon"] if m not in seen_data["coming_soon"]
-    ]
-
-    print(
-        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' titles."
-    )
-
-    if new_now_showing or new_coming_soon:
-        print(
-            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
-        )
-        send_discord_notification(new_now_showing, new_coming_soon)
-    else:
-        print("No new movies found since last run.")
-
-    save_seen_movies(current_data)
-    print(f"Updated {SEEN_MOVIES_FILE} successfully.")
+    main()
