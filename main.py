@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -14,6 +15,18 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
 }
+
+# Ignore strings that are UI components, image formats, or generic site labels
+INVALID_TITLES = [
+    "format,webp",
+    "webp",
+    "banner",
+    "emperor",
+    "logo",
+    "default",
+    "poster",
+    "carousel",
+]
 
 
 def send_discord_notification(message):
@@ -54,9 +67,39 @@ def clean_title(title):
     if not title:
         return ""
     cleaned = " ".join(title.split())
-    if len(cleaned) < 2:
+
+    # Check against invalid substrings
+    lowered = cleaned.lower()
+    if (
+        len(cleaned) < 2
+        or any(invalid in lowered for invalid in INVALID_TITLES)
+        or cleaned.isdigit()
+    ):
         return ""
+
     return cleaned
+
+
+def extract_title_from_url(img_url):
+    """Extracts a readable movie name from image path if alt text is missing."""
+    if not img_url:
+        return ""
+
+    # Strip query parameters (?format=webp, ?v=123, etc.)
+    base_url = img_url.split("?")[0]
+
+    # Get the last segment of the path
+    filename = base_url.split("/")[-1]
+
+    # Remove file extensions
+    raw_title = re.sub(
+        r"\.(jpg|jpeg|png|webp|gif|svg)$", "", filename, flags=re.IGNORECASE
+    )
+
+    # Convert encoded spaces/dashes to standard spaces
+    raw_title = raw_title.replace("%20", " ").replace("-", " ").replace("_", " ")
+
+    return clean_title(raw_title)
 
 
 def fetch_mcl_movies():
@@ -113,7 +156,7 @@ def fetch_mcl_movies():
 
 
 def fetch_emperor_movies():
-    """Renders Emperor's SPA page via Playwright and parses Swiper carousel slides."""
+    """Renders Emperor's SPA page via Playwright and parses movie titles safely."""
     coming_soon, now_showing = [], []
     url = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
 
@@ -123,42 +166,43 @@ def fetch_emperor_movies():
             page = browser.new_page()
             page.goto(url, wait_until="networkidle", timeout=30000)
 
-            # Get full dynamic HTML content post-render
+            # 1. Try extracting text labels directly from DOM cards/titles
+            titles = page.locator(
+                ".film_title, .movie_title, .film-name, .title, h3, h4"
+            ).all_inner_texts()
+            for title in titles:
+                cleaned = clean_title(title)
+                if cleaned and cleaned not in now_showing:
+                    now_showing.append(cleaned)
+
+            # 2. Parse Swiper slides with improved fallback detection
             content = page.content()
             soup = BeautifulSoup(content, "html.parser")
-
-            # Extract movies from non-duplicated Swiper carousel slides
             slides = soup.select(".swiper-slide:not(.swiper-slide-duplicate)")
+
             for slide in slides:
+                movie_title = ""
+
+                # Check text tags inside slide
+                text_tag = slide.select_one(
+                    ".film_title, .movie_title, .film-name, h3, h4"
+                )
+                if text_tag:
+                    movie_title = clean_title(text_tag.get_text())
+
+                # Check img attributes (alt, title)
                 img_tag = slide.find("img")
-                if img_tag:
-                    img_url = img_tag.get("src", "")
+                if not movie_title and img_tag:
+                    alt_text = img_tag.get("alt") or img_tag.get("title") or ""
+                    movie_title = clean_title(alt_text)
 
-                    # Extract title from the image path/filename
-                    filename = img_url.split("/")[-1].split("?")[0]
-                    raw_title = filename.rsplit(".", 1)[0]
-                    cleaned = clean_title(raw_title)
+                    # Extract title safely from URL if no alt text exists
+                    if not movie_title:
+                        img_url = img_tag.get("src", "")
+                        movie_title = extract_title_from_url(img_url)
 
-                    if (
-                        cleaned
-                        and cleaned not in now_showing
-                        and "Emperor" not in cleaned
-                    ):
-                        now_showing.append(cleaned)
-
-            # Fallback text extractors if carousel slide titles are empty
-            if not now_showing:
-                titles = page.locator(
-                    ".film_title, .movie_title, .film-name, .title, h3, h4"
-                ).all_inner_texts()
-                for title in titles:
-                    cleaned = clean_title(title)
-                    if (
-                        cleaned
-                        and cleaned not in now_showing
-                        and "Emperor" not in cleaned
-                    ):
-                        now_showing.append(cleaned)
+                if movie_title and movie_title not in now_showing:
+                    now_showing.append(movie_title)
 
             browser.close()
     except Exception as e:
