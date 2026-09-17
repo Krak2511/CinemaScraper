@@ -45,7 +45,7 @@ def save_seen_movies(seen_data):
 
 def send_discord_notification(new_now_showing, new_coming_soon):
     if not DISCORD_WEBHOOK_URL:
-        print("DISCORD_WEBHOOK_URL is not configured. Skipping notification.")
+        print("[Warning] DISCORD_WEBHOOK_URL environment variable is NOT set.")
         return
 
     fields = []
@@ -79,11 +79,20 @@ def send_discord_notification(new_now_showing, new_coming_soon):
     }
 
     try:
-        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        print("Successfully sent Discord notification.")
+        response = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        if response.status_code in (200, 204):
+            print("Successfully delivered Discord notification!")
+        else:
+            print(
+                f"[Error] Discord API returned status {response.status_code}: {response.text}"
+            )
     except Exception as e:
-        print(f"Failed to send Discord webhook: {e}")
+        print(f"[Error] Failed to execute Discord request: {e}")
 
 
 def fetch_live_movies():
@@ -92,11 +101,27 @@ def fetch_live_movies():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context(
+            locale="en-US",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
 
+        page = context.new_page()
         page.goto(URL, wait_until="domcontentloaded")
+
+        # Wait for dynamic elements to render
         page.wait_for_selector(".line-clamp-6", timeout=20000)
 
+        # Force English interface by clicking language switch icon if present
+        try:
+            lang_btn = page.query_selector("div.cursor-pointer:has-text('中')")
+            if lang_btn:
+                lang_btn.click()
+                page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+        # Scrape titles currently rendered in the active DOM tab
         title_elements = page.query_selector_all(
             "div.hover-mask div.line-clamp-6.text-ellipsis"
         )
@@ -108,10 +133,12 @@ def fetch_live_movies():
                 clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
                 formatted_title = f"Emperor Cinemas: {clean_title}"
 
+                # Separate titles based on DOM section or fall back to default bucket
                 is_coming_soon = el.evaluate(
                     """node => {
-                    const parent = node.closest('[class*="soon"], [id*="soon"]');
-                    return parent !== null;
+                    const textContent = document.body.innerText.lowerCase;
+                    const section = node.closest('section, div[class*="content"]');
+                    return section ? section.innerText.includes("Coming Soon") : false;
                 }"""
                 )
 
@@ -131,7 +158,7 @@ if __name__ == "__main__":
     current_data = fetch_live_movies()
     seen_data = load_seen_movies()
 
-    # Identify newly discovered movies
+    # Determine differences
     new_now_showing = [
         m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
     ]
@@ -139,15 +166,18 @@ if __name__ == "__main__":
         m for m in current_data["coming_soon"] if m not in seen_data["coming_soon"]
     ]
 
-    # Notify if there are new titles
+    print(
+        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' movies."
+    )
+
     if new_now_showing or new_coming_soon:
         print(
-            f"Found {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' movies."
+            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
         )
         send_discord_notification(new_now_showing, new_coming_soon)
     else:
-        print("No new movies found.")
+        print("No new movies found since last check.")
 
-    # Update state file
+    # Overwrite seen_movies.json with the freshly parsed structure
     save_seen_movies(current_data)
-    print(json.dumps(current_data, indent=2, ensure_ascii=False))
+    print("Updated seen_movies.json successfully.")
