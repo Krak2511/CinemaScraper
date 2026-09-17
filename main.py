@@ -4,7 +4,13 @@ import re
 import requests
 from playwright.sync_api import sync_playwright
 
-URL = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
+# URLs
+EMPEROR_URL = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS&lang=en-US"
+MCL_NOW_SHOWING_URL = "https://www.mclcinema.com/NowShowing.aspx?visLang=2"
+MCL_COMING_SOON_URL = "https://www.mclcinema.com/ComingSoon.aspx?visLang=2"
+BROADWAY_NOW_SHOWING_URL = "https://www.cinema.com.hk/en/movie/ticketing"
+BROADWAY_COMING_SOON_URL = "https://www.cinema.com.hk/en/movie/upcoming"
+
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 SEEN_MOVIES_FILE = "seen_movies.json"
 
@@ -17,11 +23,62 @@ PROMO_KEYWORDS = [
     r"popcorn",
 ]
 
+# Words to keep lowercase unless they appear at the start or end of a title
+LOWERCASE_WORDS = {
+    "a", "an", "and", "as", "at", "but", "by", "for", "from",
+    "in", "into", "like", "near", "of", "off", "on", "onto",
+    "or", "out", "over", "the", "to", "up", "upon", "with"
+}
+
+# Standard tech/cinema terms to preserve uppercase
+PRESERVE_UPPERCASE = {"IMAX", "4DX", "CGS", "3D", "2D", "BTS"}
+
+
+def to_title_case(text):
+    """Formats text to Proper Title Case while keeping prepositions lowercase 
+    and preserving cinema acronyms (IMAX, 4DX, CGS, BTS, etc.)."""
+    if not text:
+        return ""
+
+    words = re.findall(r"[\w']+|[^\w\s]", text)
+    formatted_words = []
+
+    for i, word in enumerate(words):
+        upper_word = word.upper()
+        clean_word = word.lower()
+
+        if upper_word in PRESERVE_UPPERCASE:
+            formatted_words.append(upper_word)
+        elif not word.isalnum():
+            formatted_words.append(word)
+        elif i == 0 or i == len(words) - 1:
+            formatted_words.append(word.capitalize())
+        elif clean_word in LOWERCASE_WORDS:
+            formatted_words.append(clean_word)
+        else:
+            formatted_words.append(word.capitalize())
+
+    result = ""
+    for token in formatted_words:
+        if token in "':-–—!?,.()[]":
+            result = result.rstrip() + token
+        elif result and result[-1] in "([{":
+            result += token
+        else:
+            result = f"{result} {token}".strip() if result else token
+
+    return result
+
 
 def is_movie_title(text):
     if not text:
         return False
-    clean_text = text.replace("Emperor Cinemas:", "").strip()
+    clean_text = (
+        text.replace("Emperor Cinemas:", "")
+        .replace("MCL:", "")
+        .replace("Broadway:", "")
+        .strip()
+    )
     for pattern in PROMO_KEYWORDS:
         if re.search(pattern, clean_text, re.IGNORECASE):
             return False
@@ -39,7 +96,6 @@ def load_seen_movies():
 
 
 def save_seen_movies(seen_data):
-    # Writes output directly to file and flushes OS buffer
     with open(SEEN_MOVIES_FILE, "w", encoding="utf-8") as f:
         json.dump(seen_data, f, indent=2, ensure_ascii=False)
         f.flush()
@@ -74,7 +130,7 @@ def send_discord_notification(new_now_showing, new_coming_soon):
     payload = {
         "embeds": [
             {
-                "title": "🎭 New Movies Detected on Emperor Cinemas!",
+                "title": "🎭 New Movies Detected!",
                 "color": 3447003,
                 "fields": fields,
             }
@@ -98,64 +154,122 @@ def send_discord_notification(new_now_showing, new_coming_soon):
         print(f"[Error] Failed to execute Discord request: {e}")
 
 
-def fetch_live_movies():
+def fetch_emperor_movies(page):
     now_showing = []
-    coming_soon = []
+    page.goto(EMPEROR_URL, wait_until="domcontentloaded", timeout=60000)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Force default headers so site serves English/Chinese predictably
-        context = browser.new_context(locale="en-US")
-        page = context.new_page()
-
-        page.goto(URL, wait_until="networkidle")
-
-        # 1. Look for the language button specifically matching 'En' or '中'
-        try:
-            # Selector targeting the exact language wrapper class from your snippet
-            lang_toggle = page.query_selector(
-                "div.flex.cursor-pointer.items-center"
-            )
-
-            if lang_toggle:
-                toggle_text = lang_toggle.inner_text().strip()
-                # If the button says "En", clicking it switches the page to English
-                if "En" in toggle_text:
-                    lang_toggle.click()
-                    page.wait_for_timeout(3000)  # Wait for JS re-render
-        except Exception as e:
-            print(f"[Warning] Language toggle step encountered issue: {e}")
-
-        # Wait for movie cards to appear in DOM
-        page.wait_for_selector(".line-clamp-6", timeout=20000)
-
-        # 2. Extract titles
+    try:
+        page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
         title_elements = page.query_selector_all(
             "div.hover-mask div.line-clamp-6.text-ellipsis"
         )
 
         for el in title_elements:
             raw_title = el.inner_text().strip()
-
             if is_movie_title(raw_title):
                 clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
-                formatted_title = f"Emperor Cinemas: {clean_title}"
+                formatted_title = f"Emperor Cinemas: {to_title_case(clean_title)}"
+                if formatted_title not in now_showing:
+                    now_showing.append(formatted_title)
+    except Exception as e:
+        print(f"[Error] Failed scraping Emperor Cinemas: {e}")
 
-                # Simplified block check
-                is_coming_soon = el.evaluate(
-                    """node => {
-                    const text = document.body.innerText.toLowerCase();
-                    const container = node.closest('section') || node.parentElement;
-                    return container ? container.innerText.toLowerCase().includes("coming soon") : false;
-                }"""
-                )
+    return now_showing
 
-                if is_coming_soon:
+
+def fetch_mcl_movies(page, url, prefix="MCL:"):
+    movies = []
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+    try:
+        page.wait_for_selector(".movies-container .movie-container mark", state="attached", timeout=20000)
+        title_elements = page.query_selector_all(
+            ".movies-container .movie-container mark"
+        )
+
+        for el in title_elements:
+            raw_title = el.inner_text().strip()
+            if is_movie_title(raw_title):
+                formatted_title = f"{prefix} {to_title_case(raw_title)}"
+                if formatted_title not in movies:
+                    movies.append(formatted_title)
+    except Exception as e:
+        print(f"[Error] Failed scraping MCL url ({url}): {e}")
+
+    return movies
+
+
+def fetch_broadway_now_showing(page):
+    now_showing = []
+    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
+
+    try:
+        page.wait_for_selector("#mobile-movie-show p.font-semibold", state="attached", timeout=20000)
+        title_elements = page.query_selector_all(
+            "#mobile-movie-show a div p.font-semibold"
+        )
+
+        for el in title_elements:
+            raw_title = el.inner_text().strip()
+            if is_movie_title(raw_title):
+                formatted_title = f"Broadway: {to_title_case(raw_title)}"
+                if formatted_title not in now_showing:
+                    now_showing.append(formatted_title)
+    except Exception as e:
+        print(f"[Error] Failed scraping Broadway Now Showing: {e}")
+
+    return now_showing
+
+
+def fetch_broadway_coming_soon(page):
+    coming_soon = []
+    page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
+
+    try:
+        page.wait_for_selector("a[href*='/en/movie/'] img[alt]", state="attached", timeout=20000)
+        img_elements = page.query_selector_all("a[href*='/en/movie/'] img[alt]")
+
+        for el in img_elements:
+            raw_title = el.get_attribute("alt")
+            if raw_title:
+                raw_title = raw_title.strip()
+                if is_movie_title(raw_title):
+                    formatted_title = f"Broadway: {to_title_case(raw_title)}"
                     if formatted_title not in coming_soon:
                         coming_soon.append(formatted_title)
-                else:
-                    if formatted_title not in now_showing:
-                        now_showing.append(formatted_title)
+    except Exception as e:
+        print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
+
+    return coming_soon
+
+
+def fetch_all_live_movies():
+    now_showing = []
+    coming_soon = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        # 1. Fetch Emperor Cinemas
+        emperor_movies = fetch_emperor_movies(page)
+        now_showing.extend(emperor_movies)
+
+        # 2. Fetch MCL Now Showing
+        mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
+        now_showing.extend(mcl_now)
+
+        # 3. Fetch MCL Coming Soon
+        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
+        coming_soon.extend(mcl_soon)
+
+        # 4. Fetch Broadway Now Showing
+        broadway_now = fetch_broadway_now_showing(page)
+        now_showing.extend(broadway_now)
+
+        # 5. Fetch Broadway Coming Soon
+        broadway_soon = fetch_broadway_coming_soon(page)
+        coming_soon.extend(broadway_soon)
 
         browser.close()
 
@@ -163,10 +277,9 @@ def fetch_live_movies():
 
 
 if __name__ == "__main__":
-    current_data = fetch_live_movies()
+    current_data = fetch_all_live_movies()
     seen_data = load_seen_movies()
 
-    # Calculate differences
     new_now_showing = [
         m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
     ]
@@ -180,12 +293,11 @@ if __name__ == "__main__":
 
     if new_now_showing or new_coming_soon:
         print(
-            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' movies."
+            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
         )
         send_discord_notification(new_now_showing, new_coming_soon)
     else:
         print("No new movies found since last run.")
 
-    # Save data explicitly
     save_seen_movies(current_data)
     print(f"Updated {SEEN_MOVIES_FILE} successfully.")
