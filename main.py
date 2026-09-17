@@ -200,27 +200,46 @@ def send_discord_notification(new_now_showing, new_coming_soon):
             print(f"[Error] Failed to execute Discord request: {e}")
 
 
+def _extract_emperor_titles(page):
+    """Internal helper to extract movie titles from Emperor Cinemas page."""
+    page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
+    title_elements = page.query_selector_all("div.hover-mask div.line-clamp-6.text-ellipsis")
+    
+    titles = []
+    for el in title_elements:
+        raw_title = el.inner_text().strip()
+        if is_movie_title(raw_title):
+            clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
+            formatted_title = f"Emperor Cinemas: {to_title_case(clean_title)}"
+            if formatted_title not in titles:
+                titles.append(formatted_title)
+    return titles
+
+
 def fetch_emperor_movies(page):
+    """Fetches both 'Now Showing' and 'Coming Soon' movies from Emperor Cinemas."""
     now_showing = []
-    page.goto(EMPEROR_URL, wait_until="domcontentloaded", timeout=60000)
+    coming_soon = []
 
     try:
-        page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
-        title_elements = page.query_selector_all(
-            "div.hover-mask div.line-clamp-6.text-ellipsis"
-        )
+        page.goto(EMPEROR_URL, wait_until="domcontentloaded", timeout=60000)
 
-        for el in title_elements:
-            raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
-                clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
-                formatted_title = f"Emperor Cinemas: {to_title_case(clean_title)}"
-                if formatted_title not in now_showing:
-                    now_showing.append(formatted_title)
+        # 1. Scrape Now Showing (default view)
+        now_showing = _extract_emperor_titles(page)
+
+        # 2. Click the 'COMING SOON' tab and scrape Coming Soon
+        coming_soon_btn = page.locator('div[data-text="COMING SOON"]').or_(page.locator('text="COMING SOON"'))
+        if coming_soon_btn.count() > 0:
+            coming_soon_btn.first.click()
+            page.wait_for_timeout(2000)  # Allow dynamic content to load
+            coming_soon = _extract_emperor_titles(page)
+        else:
+            print("[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found.")
+
     except Exception as e:
         print(f"[Error] Failed scraping Emperor Cinemas: {e}")
 
-    return now_showing
+    return {"now_showing": now_showing, "coming_soon": coming_soon}
 
 
 def fetch_mcl_movies(page, url, prefix="MCL:"):
@@ -297,9 +316,10 @@ def fetch_all_live_movies():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 1. Fetch Emperor Cinemas
+        # 1. Fetch Emperor Cinemas (Now Showing & Coming Soon)
         emperor_movies = fetch_emperor_movies(page)
-        now_showing.extend(emperor_movies)
+        now_showing.extend(emperor_movies["now_showing"])
+        coming_soon.extend(emperor_movies["coming_soon"])
 
         # 2. Fetch MCL Now Showing
         mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
