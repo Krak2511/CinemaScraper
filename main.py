@@ -2,14 +2,14 @@ import os
 import json
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 STATE_FILE = "seen_movies.json"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/json, text/plain, */*",
 }
 
 def send_discord_notification(message):
@@ -43,86 +43,77 @@ def save_current_state(state):
 def clean_title(title):
     if not title:
         return ""
-    # Strip unnecessary whitespaces and newlines
     cleaned = " ".join(title.split())
-    # Exclude common site UI text or button labels
-    ignored_words = [
-        "home", "ticketing", "coming soon", "now showing", "mcl club", 
-        "cinema", "buy tickets", "more info", "trailer", "select cinema"
-    ]
-    if cleaned.lower() in ignored_words or len(cleaned) < 2:
+    if len(cleaned) < 2:
         return ""
     return cleaned
 
-def fetch_emperor_movies():
-    """Scrapes Emperor's unified film listing page."""
+def fetch_mcl_movies():
+    """Scrapes MCL directly via its mobile JSON API endpoints."""
     coming_soon, now_showing = [], []
-    url = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
-    
+
+    # MCL Now Showing API
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        # Emperor group titles inside movie item containers
-        movie_cards = soup.select(".film_item, .movie_item, .film_box, .film-item, [class*='film']")
-        
-        if not movie_cards:
-            # Fallback to direct title targets
-            movie_cards = soup.select(".film_title, .movie_title, .film-name, .movie-name")
-            for card in movie_cards:
-                title = clean_title(card.get_text())
+        url_ns = "https://m.mclcinema.com/Ticketing/GetNowShowingList?lang=2"
+        res = requests.get(url_ns, headers=HEADERS, timeout=15)
+        if res.status_code == 200 and "json" in res.headers.get("Content-Type", ""):
+            data = res.json()
+            for movie in data.get("data", []):
+                title = clean_title(movie.get("MovieNameEn") or movie.get("MovieName"))
                 if title and title not in now_showing:
                     now_showing.append(title)
         else:
-            for card in movie_cards:
-                title_el = card.select_one(".film_title, .movie_title, .name, h3, h4")
-                if title_el:
-                    title = clean_title(title_el.get_text())
-                    if title:
-                        # Determine status based on parent tab or badge text
-                        card_text = card.get_text().lower()
-                        if "coming soon" in card_text or "upcoming" in card_text:
-                            if title not in coming_soon:
-                                coming_soon.append(title)
-                        else:
-                            if title not in now_showing:
-                                now_showing.append(title)
-
-    except Exception as e:
-        print(f"Error fetching Emperor Cinemas: {e}")
-
-    return coming_soon, now_showing
-
-def fetch_mcl_movies():
-    """Scrapes MCL Now Showing and Coming Soon pages."""
-    coming_soon, now_showing = [], []
-    
-    # 1. MCL Now Showing
-    try:
-        url_ns = "https://www.mclcinema.com/NowShowing.aspx?visLang=2"
-        res = requests.get(url_ns, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        # Target specific movie title containers within listing blocks
-        for el in soup.select(".movie_name, .title_en, .film_title, .movie-title-text, .movie_list .title"):
-            title = clean_title(el.get_text())
-            if title and title not in now_showing:
-                now_showing.append(title)
+            # HTML Fallback with mobile URL
+            soup = BeautifulSoup(res.text, "html.parser")
+            for el in soup.select(".movie-name, .film-title, .title"):
+                title = clean_title(el.get_text())
+                if title and title not in now_showing:
+                    now_showing.append(title)
     except Exception as e:
         print(f"Error fetching MCL Now Showing: {e}")
 
-    # 2. MCL Coming Soon
+    # MCL Coming Soon API
     try:
-        url_cs = "https://www.mclcinema.com/ComingSoon.aspx?visLang=2"
+        url_cs = "https://m.mclcinema.com/Ticketing/GetUpcomingList?lang=2"
         res = requests.get(url_cs, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        for el in soup.select(".movie_name, .title_en, .film_title, .movie-title-text, .movie_list .title"):
-            title = clean_title(el.get_text())
-            if title and title not in coming_soon:
-                coming_soon.append(title)
+        if res.status_code == 200 and "json" in res.headers.get("Content-Type", ""):
+            data = res.json()
+            for movie in data.get("data", []):
+                title = clean_title(movie.get("MovieNameEn") or movie.get("MovieName"))
+                if title and title not in coming_soon:
+                    coming_soon.append(title)
+        else:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for el in soup.select(".movie-name, .film-title, .title"):
+                title = clean_title(el.get_text())
+                if title and title not in coming_soon:
+                    coming_soon.append(title)
     except Exception as e:
         print(f"Error fetching MCL Coming Soon: {e}")
+
+    return coming_soon, now_showing
+
+def fetch_emperor_movies():
+    """Uses Playwright to render Emperor's dynamic SPA page."""
+    coming_soon, now_showing = [], []
+    url = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+
+            # Extract rendered text elements
+            titles = page.locator(".film_title, .movie_title, .film-name, .title, h3, h4").all_inner_texts()
+            for title in titles:
+                cleaned = clean_title(title)
+                if cleaned and cleaned not in now_showing and "Emperor" not in cleaned:
+                    now_showing.append(cleaned)
+
+            browser.close()
+    except Exception as e:
+        print(f"Error fetching Emperor Cinemas via Playwright: {e}")
 
     return coming_soon, now_showing
 
@@ -142,6 +133,7 @@ def main():
 
     for chain_name, fetcher in chains.items():
         cs, ns = fetcher()
+        print(f"[{chain_name}] Found {len(cs)} Coming Soon, {len(ns)} Now Showing movies.")
         
         for movie in cs:
             full_entry = f"{chain_name}: {movie}"
@@ -161,7 +153,7 @@ def main():
         print(f"Sent {len(alerts)} alert(s) to Discord.")
     elif is_initial_run:
         print("Initial state created.")
-        send_discord_notification("✅ **Cinema Tracker Reset & Updated!** Now watching Emperor Cinemas and MCL Cinemas.")
+        send_discord_notification(f"✅ **Cinema Tracker Initialized!** Stored initial list of movies across MCL and Emperor.")
     else:
         print("No new movie updates detected.")
 
