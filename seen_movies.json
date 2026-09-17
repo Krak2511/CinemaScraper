@@ -1,4 +1,44 @@
 {
-  "coming_soon": [],
-  "now_showing": []
+  "coming_soon": [
+    "MCL Cinemas: About Us",
+    "MCL Cinemas: Ticketing",
+    "MCL Cinemas: Coming Soon",
+    "MCL Cinemas: Festivals & Programs",
+    "MCL Cinemas: Promotions & News",
+    "MCL Cinemas: Events",
+    "MCL Cinemas: SCREEN AD",
+    "MCL Cinemas: House Booking",
+    "MCL Cinemas: Home",
+    "MCL Cinemas: PROMOTIONS & NEWS",
+    "MCL Cinemas: Order Checking",
+    "MCL Cinemas: Our Cinemas",
+    "MCL Cinemas: Member Login",
+    "MCL Cinemas: Membership News",
+    "MCL Cinemas: Contact Us",
+    "MCL Cinemas: Career",
+    "MCL Cinemas: FAQ",
+    "MCL Cinemas: Personal Information Collection Statement",
+    "MCL Cinemas: Privacy Policy Statement",
+    "MCL Cinemas: Terms of Use"
+  ],
+  "now_showing": [
+    "MCL Cinemas: 關於我們",
+    "MCL Cinemas: 現正發售",
+    "MCL Cinemas: 即將上映",
+    "MCL Cinemas: 特備節目",
+    "MCL Cinemas: 推廣優惠及消息",
+    "MCL Cinemas: 最新活動",
+    "MCL Cinemas: 銀幕廣告",
+    "MCL Cinemas: 包場查詢",
+    "MCL Cinemas: 查詢購票紀錄",
+    "MCL Cinemas: 我們的戲院",
+    "MCL Cinemas: 會員登入",
+    "MCL Cinemas: 會員最新消息",
+    "MCL Cinemas: 聯絡我們",
+    "MCL Cinemas: 招募精英",
+    "MCL Cinemas: 常見問題",
+    "MCL Cinemas: 個人資料收集聲明",
+    "MCL Cinemas: 私隱政策聲明",
+    "MCL Cinemas: 使用條款"
+  ]
 }
