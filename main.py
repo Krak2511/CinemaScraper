@@ -33,14 +33,17 @@ def load_seen_movies():
         try:
             with open(SEEN_MOVIES_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except json.JSONDecodeError:
+        except Exception:
             pass
     return {"now_showing": [], "coming_soon": []}
 
 
 def save_seen_movies(seen_data):
+    # Writes output directly to file and flushes OS buffer
     with open(SEEN_MOVIES_FILE, "w", encoding="utf-8") as f:
         json.dump(seen_data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def send_discord_notification(new_now_showing, new_coming_soon):
@@ -89,7 +92,7 @@ def send_discord_notification(new_now_showing, new_coming_soon):
             print("Successfully delivered Discord notification!")
         else:
             print(
-                f"[Error] Discord API returned status {response.status_code}: {response.text}"
+                f"[Error] Discord API status {response.status_code}: {response.text}"
             )
     except Exception as e:
         print(f"[Error] Failed to execute Discord request: {e}")
@@ -101,23 +104,32 @@ def fetch_live_movies():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
+        # Force default headers so site serves English/Chinese predictably
+        context = browser.new_context(locale="en-US")
         page = context.new_page()
 
-        page.goto(URL, wait_until="domcontentloaded")
+        page.goto(URL, wait_until="networkidle")
+
+        # 1. Look for the language button specifically matching 'En' or '中'
+        try:
+            # Selector targeting the exact language wrapper class from your snippet
+            lang_toggle = page.query_selector(
+                "div.flex.cursor-pointer.items-center"
+            )
+
+            if lang_toggle:
+                toggle_text = lang_toggle.inner_text().strip()
+                # If the button says "En", clicking it switches the page to English
+                if "En" in toggle_text:
+                    lang_toggle.click()
+                    page.wait_for_timeout(3000)  # Wait for JS re-render
+        except Exception as e:
+            print(f"[Warning] Language toggle step encountered issue: {e}")
+
+        # Wait for movie cards to appear in DOM
         page.wait_for_selector(".line-clamp-6", timeout=20000)
 
-        # Target the exact "En" language switch button provided in your HTML
-        try:
-            en_btn = page.query_selector("div.cursor-pointer:has-text('En')")
-            if en_btn:
-                en_btn.click()
-                # Brief wait for DOM text updates after switching language
-                page.wait_for_timeout(2500)
-        except Exception as e:
-            print(f"[Warning] Language switch skipped: {e}")
-
-        # Extract movie elements on initial page load without clicking tabs
+        # 2. Extract titles
         title_elements = page.query_selector_all(
             "div.hover-mask div.line-clamp-6.text-ellipsis"
         )
@@ -129,11 +141,12 @@ def fetch_live_movies():
                 clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
                 formatted_title = f"Emperor Cinemas: {clean_title}"
 
-                # Categorize based on parent block text attributes
+                # Simplified block check
                 is_coming_soon = el.evaluate(
                     """node => {
-                    const parent = node.closest('[class*="soon"], [id*="soon"], section, div');
-                    return parent ? parent.innerText.toLowerCase().includes("coming soon") : false;
+                    const text = document.body.innerText.toLowerCase();
+                    const container = node.closest('section') || node.parentElement;
+                    return container ? container.innerText.toLowerCase().includes("coming soon") : false;
                 }"""
                 )
 
@@ -153,7 +166,7 @@ if __name__ == "__main__":
     current_data = fetch_live_movies()
     seen_data = load_seen_movies()
 
-    # Calculate differences against previous run
+    # Calculate differences
     new_now_showing = [
         m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
     ]
@@ -167,12 +180,12 @@ if __name__ == "__main__":
 
     if new_now_showing or new_coming_soon:
         print(
-            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
+            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' movies."
         )
         send_discord_notification(new_now_showing, new_coming_soon)
     else:
         print("No new movies found since last run.")
 
-    # Always write updated state to file
+    # Save data explicitly
     save_seen_movies(current_data)
-    print("Updated seen_movies.json successfully.")
+    print(f"Updated {SEEN_MOVIES_FILE} successfully.")
