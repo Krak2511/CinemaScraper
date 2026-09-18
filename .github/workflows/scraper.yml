@@ -2,7 +2,7 @@ name: Cinema Scraper Cron
 
 on:
   schedule:
-    - cron: '*/28 * * * *'
+    - cron: '2,32 * * * *'
   workflow_dispatch:
 
 permissions:
