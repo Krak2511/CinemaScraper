@@ -5,7 +5,9 @@ import requests
 from playwright.sync_api import sync_playwright
 
 # URLs
-EMPEROR_URL = "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS&lang=en-US"
+EMPEROR_URL = (
+    "https://www.emperorcinemas.com/film?wapid=ECML_WEB_PROD_S_MPS&lang=en-US"
+)
 MCL_NOW_SHOWING_URL = "https://www.mclcinema.com/NowShowing.aspx?visLang=2"
 MCL_COMING_SOON_URL = "https://www.mclcinema.com/ComingSoon.aspx?visLang=2"
 BROADWAY_NOW_SHOWING_URL = "https://www.cinema.com.hk/en/movie/ticketing"
@@ -25,9 +27,31 @@ PROMO_KEYWORDS = [
 
 # Words to keep lowercase unless they appear at the start or end of a title
 LOWERCASE_WORDS = {
-    "a", "an", "and", "as", "at", "but", "by", "for", "from",
-    "in", "into", "like", "near", "of", "off", "on", "onto",
-    "or", "out", "over", "the", "to", "up", "upon", "with"
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "but",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "like",
+    "near",
+    "of",
+    "off",
+    "on",
+    "onto",
+    "or",
+    "out",
+    "over",
+    "the",
+    "to",
+    "up",
+    "upon",
+    "with",
 }
 
 # Standard tech/cinema terms to preserve uppercase
@@ -35,8 +59,10 @@ PRESERVE_UPPERCASE = {"IMAX", "4DX", "CGS", "3D", "2D", "BTS"}
 
 
 def to_title_case(text):
-    """Formats text to Proper Title Case while keeping prepositions lowercase 
-    and preserving cinema acronyms (IMAX, 4DX, CGS, BTS, etc.)."""
+    """Formats text to Proper Title Case while keeping prepositions lowercase
+
+    and preserving cinema acronyms (IMAX, 4DX, CGS, BTS, etc.).
+    """
     if not text:
         return ""
 
@@ -112,11 +138,12 @@ def build_discord_fields(section_title, titles, max_len=900):
     for title in titles:
         line = f"• {title}"
         if current_length + len(line) + 1 > max_len:
-            field_name = section_title if part == 1 else f"{section_title} (Part {part})"
-            fields.append({
-                "name": field_name,
-                "value": "\n".join(current_lines)
-            })
+            field_name = (
+                section_title if part == 1 else f"{section_title} (Part {part})"
+            )
+            fields.append(
+                {"name": field_name, "value": "\n".join(current_lines)}
+            )
             current_lines = [line]
             current_length = len(line)
             part += 1
@@ -125,11 +152,10 @@ def build_discord_fields(section_title, titles, max_len=900):
             current_length += len(line) + 1
 
     if current_lines:
-        field_name = section_title if part == 1 else f"{section_title} (Part {part})"
-        fields.append({
-            "name": field_name,
-            "value": "\n".join(current_lines)
-        })
+        field_name = (
+            section_title if part == 1 else f"{section_title} (Part {part})"
+        )
+        fields.append({"name": field_name, "value": "\n".join(current_lines)})
 
     return fields
 
@@ -141,10 +167,14 @@ def send_discord_notification(new_now_showing, new_coming_soon):
 
     all_fields = []
     if new_now_showing:
-        all_fields.extend(build_discord_fields("🎬 New Now Showing", new_now_showing))
+        all_fields.extend(
+            build_discord_fields("🎬 New Now Showing", new_now_showing)
+        )
 
     if new_coming_soon:
-        all_fields.extend(build_discord_fields("⏳ New Coming Soon", new_coming_soon))
+        all_fields.extend(
+            build_discord_fields("⏳ New Coming Soon", new_coming_soon)
+        )
 
     if not all_fields:
         return
@@ -152,13 +182,16 @@ def send_discord_notification(new_now_showing, new_coming_soon):
     # Chunk fields across multiple Discord messages to stay well under the 6,000 char total limit per embed
     MAX_CHAR_PER_PAYLOAD = 4500
     payload_batches = []
-    
+
     current_batch = []
     current_length = 0
 
     for field in all_fields:
         field_size = len(field["name"]) + len(field["value"])
-        if current_length + field_size > MAX_CHAR_PER_PAYLOAD or len(current_batch) >= 10:
+        if (
+            current_length + field_size > MAX_CHAR_PER_PAYLOAD
+            or len(current_batch) >= 10
+        ):
             payload_batches.append(current_batch)
             current_batch = [field]
             current_length = field_size
@@ -193,9 +226,13 @@ def send_discord_notification(new_now_showing, new_coming_soon):
                 timeout=10,
             )
             if response.status_code in (200, 204):
-                print(f"Successfully delivered Discord notification chunk {index}/{total_batches}!")
+                print(
+                    f"Successfully delivered Discord notification chunk {index}/{total_batches}!"
+                )
             else:
-                print(f"[Error] Discord API status {response.status_code}: {response.text}")
+                print(
+                    f"[Error] Discord API status {response.status_code}: {response.text}"
+                )
         except Exception as e:
             print(f"[Error] Failed to execute Discord request: {e}")
 
@@ -203,8 +240,10 @@ def send_discord_notification(new_now_showing, new_coming_soon):
 def _extract_emperor_titles(page):
     """Internal helper to extract movie titles from Emperor Cinemas page."""
     page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
-    title_elements = page.query_selector_all("div.hover-mask div.line-clamp-6.text-ellipsis")
-    
+    title_elements = page.query_selector_all(
+        "div.hover-mask div.line-clamp-6.text-ellipsis"
+    )
+
     titles = []
     for el in title_elements:
         raw_title = el.inner_text().strip()
@@ -222,19 +261,24 @@ def fetch_emperor_movies(page):
     coming_soon = []
 
     try:
-        page.goto(EMPEROR_URL, wait_until="domcontentloaded", timeout=60000)
+        # Changed to wait_until="commit" to avoid page timeouts on cloud servers
+        page.goto(EMPEROR_URL, wait_until="commit", timeout=60000)
 
         # 1. Scrape Now Showing (default view)
         now_showing = _extract_emperor_titles(page)
 
         # 2. Click the 'COMING SOON' tab and scrape Coming Soon
-        coming_soon_btn = page.locator('div[data-text="COMING SOON"]').or_(page.locator('text="COMING SOON"'))
+        coming_soon_btn = page.locator(
+            'div[data-text="COMING SOON"]'
+        ).or_(page.locator('text="COMING SOON"'))
         if coming_soon_btn.count() > 0:
             coming_soon_btn.first.click()
             page.wait_for_timeout(2000)  # Allow dynamic content to load
             coming_soon = _extract_emperor_titles(page)
         else:
-            print("[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found.")
+            print(
+                "[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found."
+            )
 
     except Exception as e:
         print(f"[Error] Failed scraping Emperor Cinemas: {e}")
@@ -244,12 +288,17 @@ def fetch_emperor_movies(page):
 
 def fetch_mcl_movies(page, url, prefix="MCL:"):
     movies = []
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
+    page.goto(url, wait_until="commit", timeout=60000)
 
     try:
-        page.wait_for_selector(".movies-container .movie-container mark", state="attached", timeout=20000)
+        page.wait_for_selector(
+            ".movies-container .movie-container mark, .movie-title, .title, a[href*='Movie']",
+            state="attached",
+            timeout=25000,
+        )
         title_elements = page.query_selector_all(
-            ".movies-container .movie-container mark"
+            ".movies-container .movie-container mark, .movie-title, .title, a[href*='Movie']"
         )
 
         for el in title_elements:
@@ -263,9 +312,11 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
 
     return movies
 
+
 def fetch_broadway_now_showing(page):
     now_showing = []
-    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
+    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
+    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="commit", timeout=60000)
 
     try:
         # 1. Dismiss or bypass cookie overlay if present
@@ -291,7 +342,9 @@ def fetch_broadway_now_showing(page):
         page.wait_for_selector(
             "#merged-movie-nav-dropdown a", state="attached", timeout=15000
         )
-        title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
+        title_elements = page.query_selector_all(
+            "#merged-movie-nav-dropdown a"
+        )
 
         for el in title_elements:
             raw_title = el.inner_text().strip()
@@ -313,9 +366,12 @@ def fetch_broadway_now_showing(page):
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
 
     return now_showing
+
+
 def fetch_broadway_coming_soon(page):
     coming_soon = []
-    page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
+    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
+    page.goto(BROADWAY_COMING_SOON_URL, wait_until="commit", timeout=60000)
 
     try:
         page.wait_for_selector(
@@ -344,13 +400,25 @@ def fetch_broadway_coming_soon(page):
 
     return coming_soon
 
+
 def fetch_all_live_movies():
     now_showing = []
     coming_soon = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        # Launch Chromium with extra flags for Modal execution environment stability
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
         # 1. Fetch Emperor Cinemas (Now Showing & Coming Soon)
         emperor_movies = fetch_emperor_movies(page)
@@ -383,10 +451,14 @@ if __name__ == "__main__":
     seen_data = load_seen_movies()
 
     new_now_showing = [
-        m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
+        m
+        for m in current_data["now_showing"]
+        if m not in seen_data["now_showing"]
     ]
     new_coming_soon = [
-        m for m in current_data["coming_soon"] if m not in seen_data["coming_soon"]
+        m
+        for m in current_data["coming_soon"]
+        if m not in seen_data["coming_soon"]
     ]
 
     print(
