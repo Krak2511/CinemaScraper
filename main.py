@@ -265,35 +265,48 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
 
 def fetch_broadway_now_showing(page):
     now_showing = []
-    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="commit", timeout=60000)
+    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
 
     try:
-        # Wait for the dropdown container to load in the DOM
-        page.wait_for_selector("#merged-movie-nav-dropdown a", state="attached", timeout=20000)
+        # 1. Wait for the main dropdown wrapper to exist in the DOM
+        page.wait_for_selector("#merged-movie-nav-dropdown", state="attached", timeout=20000)
+
+        # 2. Click the dropdown button to trigger render if required
+        button_selector = "#merged-movie-nav-dropdown button"
+        if page.locator(button_selector).is_visible():
+            page.click(button_selector)
+            page.wait_for_timeout(500)  # Brief wait for animations/rendering
+
+        # 3. Wait for links within the dropdown to become available
+        page.wait_for_selector("#merged-movie-nav-dropdown a", state="attached", timeout=15000)
         
-        # Target all movie title anchor tags within the dropdown container
+        # 4. Extract movie title links
         title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
 
         for el in title_elements:
             raw_title = el.inner_text().strip()
-            
-            # Skip empty strings or non-movie text
-            if raw_title and is_movie_title(raw_title):
+
+            # Filter out empty strings, 3-digit integers, or pure numeric IDs
+            if (
+                not raw_title
+                or re.fullmatch(r"\d{3}", raw_title)
+                or raw_title.isdigit()
+            ):
+                continue
+
+            if is_movie_title(raw_title):
                 formatted_title = f"Broadway: {to_title_case(raw_title)}"
                 if formatted_title not in now_showing:
                     now_showing.append(formatted_title)
-                    
+
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
 
     return now_showing
 
-import re
-
-
 def fetch_broadway_coming_soon(page):
     coming_soon = []
-    page.goto(BROADWAY_COMING_SOON_URL, wait_until="commit", timeout=60000)
+    page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
 
     try:
         page.wait_for_selector(
@@ -308,7 +321,7 @@ def fetch_broadway_coming_soon(page):
             if raw_title:
                 raw_title = raw_title.strip()
 
-                # Filter out pure 3-digit integers (or any pure numeric string)
+                # Filter out pure 3-digit integers or any pure numeric string
                 if re.fullmatch(r"\d{3}", raw_title) or raw_title.isdigit():
                     continue
 
@@ -316,6 +329,7 @@ def fetch_broadway_coming_soon(page):
                     formatted_title = f"Broadway: {to_title_case(raw_title)}"
                     if formatted_title not in coming_soon:
                         coming_soon.append(formatted_title)
+
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
 
