@@ -313,6 +313,15 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
     return movies
 
 
+def _normalize_title(raw_title: str) -> str:
+    """Collapses whitespace/newlines and applies proper title casing."""
+    if not raw_title:
+        return ""
+    # Normalize all non-standard whitespace characters (newlines, tabs, \xa0)
+    cleaned = re.sub(r"\s+", " ", raw_title).strip()
+    return to_title_case(cleaned)
+
+
 def fetch_broadway_now_showing(page):
     now_showing = []
     # Changed to wait_until="commit" to avoid page timeouts on cloud servers
@@ -342,9 +351,7 @@ def fetch_broadway_now_showing(page):
         page.wait_for_selector(
             "#merged-movie-nav-dropdown a", state="attached", timeout=15000
         )
-        title_elements = page.query_selector_all(
-            "#merged-movie-nav-dropdown a"
-        )
+        title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
 
         for el in title_elements:
             raw_title = el.inner_text().strip()
@@ -357,8 +364,11 @@ def fetch_broadway_now_showing(page):
             ):
                 continue
 
-            if is_movie_title(raw_title):
-                formatted_title = f"Broadway: {to_title_case(raw_title)}"
+            # Normalize title whitespace and casing before checks
+            normalized = _normalize_title(raw_title)
+
+            if is_movie_title(normalized):
+                formatted_title = f"Broadway: {normalized}"
                 if formatted_title not in now_showing:
                     now_showing.append(formatted_title)
 
@@ -366,7 +376,6 @@ def fetch_broadway_now_showing(page):
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
 
     return now_showing
-
 
 def fetch_broadway_coming_soon(page):
     coming_soon = []
@@ -390,8 +399,11 @@ def fetch_broadway_coming_soon(page):
                 if re.fullmatch(r"\d{3}", raw_title) or raw_title.isdigit():
                     continue
 
-                if is_movie_title(raw_title):
-                    formatted_title = f"Broadway: {to_title_case(raw_title)}"
+                # Normalize title whitespace and casing before checks
+                normalized = _normalize_title(raw_title)
+
+                if is_movie_title(normalized):
+                    formatted_title = f"Broadway: {normalized}"
                     if formatted_title not in coming_soon:
                         coming_soon.append(formatted_title)
 
@@ -399,7 +411,6 @@ def fetch_broadway_coming_soon(page):
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
 
     return coming_soon
-
 
 def fetch_all_live_movies():
     now_showing = []
