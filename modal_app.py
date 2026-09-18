@@ -1,22 +1,21 @@
+import os
 import modal
 
-# 1. Build container image with Python dependencies & Playwright Chromium
+# 1. Build image with Python dependencies & Playwright Chromium
+# Mount local directory directly to the image using add_local_dir
 image = (
     modal.Image.debian_slim()
     .pip_install("requests", "playwright")
     .run_commands("playwright install chromium --with-deps")
+    .add_local_dir(".", remote_path="/root")
 )
 
 # 2. Define the Modal App and persistent Volume for state
 app = modal.App("cinema-scraper")
 volume = modal.Volume.from_name("scraper-state-volume", create_if_missing=True)
 
-# 3. Mount repository files into the execution container
-mount = modal.Mount.from_local_dir(".", remote_path="/root")
-
 @app.function(
     image=image,
-    mounts=[mount],
     # Persists seen_movies.json inside Modal cloud storage
     volumes={"/root/data": volume},
     # Triggers every 30 minutes with zero delays
@@ -29,7 +28,6 @@ mount = modal.Mount.from_local_dir(".", remote_path="/root")
     timeout=300
 )
 def run_scraper():
-    import os
     import json
     import main
 
