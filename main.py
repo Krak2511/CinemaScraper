@@ -263,41 +263,55 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
 
     return movies
 
-
 def fetch_broadway_now_showing(page):
     now_showing = []
-    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
+    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="commit", timeout=60000)
 
     try:
-        page.wait_for_selector("#mobile-movie-show p.font-semibold", state="attached", timeout=20000)
-        title_elements = page.query_selector_all(
-            "#mobile-movie-show a div p.font-semibold"
-        )
+        # Wait for the dropdown container to load in the DOM
+        page.wait_for_selector("#merged-movie-nav-dropdown a", state="attached", timeout=20000)
+        
+        # Target all movie title anchor tags within the dropdown container
+        title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
 
         for el in title_elements:
             raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
+            
+            # Skip empty strings or non-movie text
+            if raw_title and is_movie_title(raw_title):
                 formatted_title = f"Broadway: {to_title_case(raw_title)}"
                 if formatted_title not in now_showing:
                     now_showing.append(formatted_title)
+                    
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
 
     return now_showing
 
+import re
+
 
 def fetch_broadway_coming_soon(page):
     coming_soon = []
-    page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
+    page.goto(BROADWAY_COMING_SOON_URL, wait_until="commit", timeout=60000)
 
     try:
-        page.wait_for_selector("a[href*='/en/movie/'] img[alt]", state="attached", timeout=20000)
-        img_elements = page.query_selector_all("a[href*='/en/movie/'] img[alt]")
+        page.wait_for_selector(
+            "a[href*='/en/movie/'] img[alt]", state="attached", timeout=20000
+        )
+        img_elements = page.query_selector_all(
+            "a[href*='/en/movie/'] img[alt]"
+        )
 
         for el in img_elements:
             raw_title = el.get_attribute("alt")
             if raw_title:
                 raw_title = raw_title.strip()
+
+                # Filter out pure 3-digit integers (or any pure numeric string)
+                if re.fullmatch(r"\d{3}", raw_title) or raw_title.isdigit():
+                    continue
+
                 if is_movie_title(raw_title):
                     formatted_title = f"Broadway: {to_title_case(raw_title)}"
                     if formatted_title not in coming_soon:
@@ -306,7 +320,6 @@ def fetch_broadway_coming_soon(page):
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
 
     return coming_soon
-
 
 def fetch_all_live_movies():
     now_showing = []
