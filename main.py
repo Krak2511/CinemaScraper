@@ -268,19 +268,29 @@ def fetch_broadway_now_showing(page):
     page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="domcontentloaded", timeout=60000)
 
     try:
-        # 1. Wait for the main dropdown wrapper to exist in the DOM
-        page.wait_for_selector("#merged-movie-nav-dropdown", state="attached", timeout=20000)
+        # 1. Dismiss or bypass cookie overlay if present
+        consent_button = page.locator(".fc-consent-root button.fc-cta-consent")
+        if consent_button.is_visible(timeout=3000):
+            try:
+                consent_button.click(timeout=3000)
+            except Exception:
+                pass  # Fallback if clicking consent button fails
 
-        # 2. Click the dropdown button to trigger render if required
+        # 2. Wait for main dropdown container to attach to DOM
+        page.wait_for_selector(
+            "#merged-movie-nav-dropdown", state="attached", timeout=20000
+        )
+
+        # 3. Force-click dropdown button (ignores intercepting cookie banner overlays)
         button_selector = "#merged-movie-nav-dropdown button"
-        if page.locator(button_selector).is_visible():
-            page.click(button_selector)
-            page.wait_for_timeout(500)  # Brief wait for animations/rendering
+        if page.locator(button_selector).count() > 0:
+            page.locator(button_selector).first.click(force=True)
+            page.wait_for_timeout(500)  # Brief delay for elements to mount/expand
 
-        # 3. Wait for links within the dropdown to become available
-        page.wait_for_selector("#merged-movie-nav-dropdown a", state="attached", timeout=15000)
-        
-        # 4. Extract movie title links
+        # 4. Extract movie title links directly from attached elements
+        page.wait_for_selector(
+            "#merged-movie-nav-dropdown a", state="attached", timeout=15000
+        )
         title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
 
         for el in title_elements:
@@ -303,7 +313,6 @@ def fetch_broadway_now_showing(page):
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
 
     return now_showing
-
 def fetch_broadway_coming_soon(page):
     coming_soon = []
     page.goto(BROADWAY_COMING_SOON_URL, wait_until="domcontentloaded", timeout=60000)
