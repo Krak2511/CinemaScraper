@@ -27,40 +27,25 @@ PROMO_KEYWORDS = [
 
 # Words to keep lowercase unless they appear at the start or end of a title
 LOWERCASE_WORDS = {
-    "a",
-    "an",
-    "and",
-    "as",
-    "at",
-    "but",
-    "by",
-    "for",
-    "from",
-    "in",
-    "into",
-    "like",
-    "near",
-    "of",
-    "off",
-    "on",
-    "onto",
-    "or",
-    "out",
-    "over",
-    "the",
-    "to",
-    "up",
-    "upon",
-    "with",
+    "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
+    "like", "near", "of", "off", "on", "onto", "or", "out", "over", "the",
+    "to", "up", "upon", "with",
 }
 
 # Standard tech/cinema terms to preserve uppercase
 PRESERVE_UPPERCASE = {"IMAX", "4DX", "CGS", "3D", "2D", "BTS"}
 
 
+def _normalize_title(raw_title: str) -> str:
+    """Collapses whitespace/newlines and applies proper title casing."""
+    if not raw_title:
+        return ""
+    cleaned = re.sub(r"\s+", " ", raw_title).strip()
+    return to_title_case(cleaned)
+
+
 def to_title_case(text):
     """Formats text to Proper Title Case while keeping prepositions lowercase
-
     and preserving cinema acronyms (IMAX, 4DX, CGS, BTS, etc.).
     """
     if not text:
@@ -179,10 +164,8 @@ def send_discord_notification(new_now_showing, new_coming_soon):
     if not all_fields:
         return
 
-    # Chunk fields across multiple Discord messages to stay well under the 6,000 char total limit per embed
     MAX_CHAR_PER_PAYLOAD = 4500
     payload_batches = []
-
     current_batch = []
     current_length = 0
 
@@ -247,9 +230,9 @@ def _extract_emperor_titles(page):
     titles = []
     for el in title_elements:
         raw_title = el.inner_text().strip()
-        if is_movie_title(raw_title):
-            clean_title = raw_title.replace("Emperor Cinemas:", "").strip()
-            formatted_title = f"Emperor Cinemas: {to_title_case(clean_title)}"
+        normalized = _normalize_title(raw_title)
+        if is_movie_title(normalized):
+            formatted_title = f"Emperor Cinemas: {normalized}"
             if formatted_title not in titles:
                 titles.append(formatted_title)
     return titles
@@ -257,41 +240,30 @@ def _extract_emperor_titles(page):
 
 def fetch_emperor_movies(page):
     """Fetches both 'Now Showing' and 'Coming Soon' movies from Emperor Cinemas."""
-    now_showing = []
-    coming_soon = []
-
     try:
-        # Changed to wait_until="commit" to avoid page timeouts on cloud servers
         page.goto(EMPEROR_URL, wait_until="commit", timeout=60000)
-
-        # 1. Scrape Now Showing (default view)
         now_showing = _extract_emperor_titles(page)
 
-        # 2. Click the 'COMING SOON' tab and scrape Coming Soon
+        coming_soon = []
         coming_soon_btn = page.locator(
             'div[data-text="COMING SOON"]'
         ).or_(page.locator('text="COMING SOON"'))
         if coming_soon_btn.count() > 0:
             coming_soon_btn.first.click()
-            page.wait_for_timeout(2000)  # Allow dynamic content to load
+            page.wait_for_timeout(2000)
             coming_soon = _extract_emperor_titles(page)
         else:
-            print(
-                "[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found."
-            )
+            print("[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found.")
 
+        return {"now_showing": now_showing, "coming_soon": coming_soon}
     except Exception as e:
         print(f"[Error] Failed scraping Emperor Cinemas: {e}")
-
-    return {"now_showing": now_showing, "coming_soon": coming_soon}
+        return None  # Return None on scraper failure so JSON isn't overwritten
 
 
 def fetch_mcl_movies(page, url, prefix="MCL:"):
-    movies = []
-    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
-    page.goto(url, wait_until="commit", timeout=60000)
-
     try:
+        page.goto(url, wait_until="commit", timeout=60000)
         page.wait_for_selector(
             ".movies-container .movie-container mark, .movie-title, .title, a[href*='Movie']",
             state="attached",
@@ -301,62 +273,49 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
             ".movies-container .movie-container mark, .movie-title, .title, a[href*='Movie']"
         )
 
+        movies = []
         for el in title_elements:
             raw_title = el.inner_text().strip()
-            if is_movie_title(raw_title):
-                formatted_title = f"{prefix} {to_title_case(raw_title)}"
+            normalized = _normalize_title(raw_title)
+            if is_movie_title(normalized):
+                formatted_title = f"{prefix} {normalized}"
                 if formatted_title not in movies:
                     movies.append(formatted_title)
+        return movies
     except Exception as e:
         print(f"[Error] Failed scraping MCL url ({url}): {e}")
-
-    return movies
-
-
-def _normalize_title(raw_title: str) -> str:
-    """Collapses whitespace/newlines and applies proper title casing."""
-    if not raw_title:
-        return ""
-    # Normalize all non-standard whitespace characters (newlines, tabs, \xa0)
-    cleaned = re.sub(r"\s+", " ", raw_title).strip()
-    return to_title_case(cleaned)
+        return None  # Return None on failure to preserve existing movies in JSON
 
 
 def fetch_broadway_now_showing(page):
-    now_showing = []
-    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
-    page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="commit", timeout=60000)
-
     try:
-        # 1. Dismiss or bypass cookie overlay if present
+        page.goto(BROADWAY_NOW_SHOWING_URL, wait_until="commit", timeout=60000)
+
         consent_button = page.locator(".fc-consent-root button.fc-cta-consent")
         if consent_button.is_visible(timeout=3000):
             try:
                 consent_button.click(timeout=3000)
             except Exception:
-                pass  # Fallback if clicking consent button fails
+                pass
 
-        # 2. Wait for main dropdown container to attach to DOM
         page.wait_for_selector(
             "#merged-movie-nav-dropdown", state="attached", timeout=20000
         )
 
-        # 3. Force-click dropdown button (ignores intercepting cookie banner overlays)
         button_selector = "#merged-movie-nav-dropdown button"
         if page.locator(button_selector).count() > 0:
             page.locator(button_selector).first.click(force=True)
-            page.wait_for_timeout(500)  # Brief delay for elements to mount/expand
+            page.wait_for_timeout(500)
 
-        # 4. Extract movie title links directly from attached elements
         page.wait_for_selector(
             "#merged-movie-nav-dropdown a", state="attached", timeout=15000
         )
         title_elements = page.query_selector_all("#merged-movie-nav-dropdown a")
 
+        now_showing = []
         for el in title_elements:
             raw_title = el.inner_text().strip()
 
-            # Filter out empty strings, 3-digit integers, or pure numeric IDs
             if (
                 not raw_title
                 or re.fullmatch(r"\d{3}", raw_title)
@@ -364,7 +323,6 @@ def fetch_broadway_now_showing(page):
             ):
                 continue
 
-            # Normalize title whitespace and casing before checks
             normalized = _normalize_title(raw_title)
 
             if is_movie_title(normalized):
@@ -372,17 +330,16 @@ def fetch_broadway_now_showing(page):
                 if formatted_title not in now_showing:
                     now_showing.append(formatted_title)
 
+        return now_showing
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
+        return None  # Return None on failure
 
-    return now_showing
 
 def fetch_broadway_coming_soon(page):
-    coming_soon = []
-    # Changed to wait_until="commit" to avoid page timeouts on cloud servers
-    page.goto(BROADWAY_COMING_SOON_URL, wait_until="commit", timeout=60000)
-
     try:
+        page.goto(BROADWAY_COMING_SOON_URL, wait_until="commit", timeout=60000)
+
         page.wait_for_selector(
             "a[href*='/en/movie/'] img[alt]", state="attached", timeout=20000
         )
@@ -390,16 +347,15 @@ def fetch_broadway_coming_soon(page):
             "a[href*='/en/movie/'] img[alt]"
         )
 
+        coming_soon = []
         for el in img_elements:
             raw_title = el.get_attribute("alt")
             if raw_title:
                 raw_title = raw_title.strip()
 
-                # Filter out pure 3-digit integers or any pure numeric string
                 if re.fullmatch(r"\d{3}", raw_title) or raw_title.isdigit():
                     continue
 
-                # Normalize title whitespace and casing before checks
                 normalized = _normalize_title(raw_title)
 
                 if is_movie_title(normalized):
@@ -407,17 +363,22 @@ def fetch_broadway_coming_soon(page):
                     if formatted_title not in coming_soon:
                         coming_soon.append(formatted_title)
 
+        return coming_soon
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
+        return None  # Return None on failure
 
-    return coming_soon
 
 def fetch_all_live_movies():
-    now_showing = []
-    coming_soon = []
+    results = {
+        "emperor": None,
+        "mcl_now": None,
+        "mcl_soon": None,
+        "broadway_now": None,
+        "broadway_soon": None,
+    }
 
     with sync_playwright() as p:
-        # Launch Chromium with extra flags for Modal execution environment stability
         browser = p.chromium.launch(
             headless=True,
             args=[
@@ -431,49 +392,51 @@ def fetch_all_live_movies():
         )
         page = context.new_page()
 
-        # 1. Fetch Emperor Cinemas (Now Showing & Coming Soon)
-        emperor_movies = fetch_emperor_movies(page)
-        now_showing.extend(emperor_movies["now_showing"])
-        coming_soon.extend(emperor_movies["coming_soon"])
-
-        # 2. Fetch MCL Now Showing
-        mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
-        now_showing.extend(mcl_now)
-
-        # 3. Fetch MCL Coming Soon
-        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
-        coming_soon.extend(mcl_soon)
-
-        # 4. Fetch Broadway Now Showing
-        broadway_now = fetch_broadway_now_showing(page)
-        now_showing.extend(broadway_now)
-
-        # 5. Fetch Broadway Coming Soon
-        broadway_soon = fetch_broadway_coming_soon(page)
-        coming_soon.extend(broadway_soon)
+        results["emperor"] = fetch_emperor_movies(page)
+        results["mcl_now"] = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
+        results["mcl_soon"] = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
+        results["broadway_now"] = fetch_broadway_now_showing(page)
+        results["broadway_soon"] = fetch_broadway_coming_soon(page)
 
         browser.close()
 
-    return {"coming_soon": coming_soon, "now_showing": now_showing}
+    return results
 
 
 if __name__ == "__main__":
-    current_data = fetch_all_live_movies()
+    raw_results = fetch_all_live_movies()
     seen_data = load_seen_movies()
 
+    # Collect successfully scraped movies for this run
+    current_now_showing = []
+    current_coming_soon = []
+
+    if raw_results["emperor"]:
+        current_now_showing.extend(raw_results["emperor"]["now_showing"])
+        current_coming_soon.extend(raw_results["emperor"]["coming_soon"])
+
+    if raw_results["mcl_now"] is not None:
+        current_now_showing.extend(raw_results["mcl_now"])
+
+    if raw_results["mcl_soon"] is not None:
+        current_coming_soon.extend(raw_results["mcl_soon"])
+
+    if raw_results["broadway_now"] is not None:
+        current_now_showing.extend(raw_results["broadway_now"])
+
+    if raw_results["broadway_soon"] is not None:
+        current_coming_soon.extend(raw_results["broadway_soon"])
+
+    # Calculate genuine new entries against seen history
     new_now_showing = [
-        m
-        for m in current_data["now_showing"]
-        if m not in seen_data["now_showing"]
+        m for m in current_now_showing if m not in seen_data["now_showing"]
     ]
     new_coming_soon = [
-        m
-        for m in current_data["coming_soon"]
-        if m not in seen_data["coming_soon"]
+        m for m in current_coming_soon if m not in seen_data["coming_soon"]
     ]
 
     print(
-        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' titles."
+        f"Scraped {len(current_now_showing)} 'Now Showing' and {len(current_coming_soon)} 'Coming Soon' titles."
     )
 
     if new_now_showing or new_coming_soon:
@@ -484,5 +447,15 @@ if __name__ == "__main__":
     else:
         print("No new movies found since last run.")
 
-    save_seen_movies(current_data)
+    # Merge fresh results into existing history instead of replacing it completely
+    updated_now_showing = list(
+        set(seen_data["now_showing"] + current_now_showing)
+    )
+    updated_coming_soon = list(
+        set(seen_data["coming_soon"] + current_coming_soon)
+    )
+
+    save_seen_movies(
+        {"now_showing": updated_now_showing, "coming_soon": updated_coming_soon}
+    )
     print(f"Updated {SEEN_MOVIES_FILE} successfully.")
