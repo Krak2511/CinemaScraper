@@ -97,13 +97,18 @@ def is_movie_title(text):
 
 
 def load_seen_movies():
+    """Loads existing seen movies while ensuring required dictionary keys exist."""
+    data = {"now_showing": [], "coming_soon": []}
     if os.path.exists(SEEN_MOVIES_FILE):
         try:
             with open(SEEN_MOVIES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"now_showing": [], "coming_soon": []}
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data["now_showing"] = loaded.get("now_showing", [])
+                    data["coming_soon"] = loaded.get("coming_soon", [])
+        except Exception as e:
+            print(f"[Warning] Failed to parse {SEEN_MOVIES_FILE}: {e}")
+    return data
 
 
 def save_seen_movies(seen_data):
@@ -428,11 +433,14 @@ if __name__ == "__main__":
         current_coming_soon.extend(raw_results["broadway_soon"])
 
     # Calculate genuine new entries against seen history
+    seen_now_showing = seen_data.get("now_showing", [])
+    seen_coming_soon = seen_data.get("coming_soon", [])
+
     new_now_showing = [
-        m for m in current_now_showing if m not in seen_data["now_showing"]
+        m for m in current_now_showing if m not in seen_now_showing
     ]
     new_coming_soon = [
-        m for m in current_coming_soon if m not in seen_data["coming_soon"]
+        m for m in current_coming_soon if m not in seen_coming_soon
     ]
 
     print(
@@ -449,10 +457,10 @@ if __name__ == "__main__":
 
     # Merge fresh results into existing history instead of replacing it completely
     updated_now_showing = list(
-        set(seen_data["now_showing"] + current_now_showing)
+        set(seen_now_showing + current_now_showing)
     )
     updated_coming_soon = list(
-        set(seen_data["coming_soon"] + current_coming_soon)
+        set(seen_coming_soon + current_coming_soon)
     )
 
     save_seen_movies(
