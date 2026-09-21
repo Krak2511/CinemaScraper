@@ -244,7 +244,7 @@ def _extract_emperor_titles(page):
         return titles
     except Exception as e:
         print(f"[Warning] Failed extracting Emperor titles: {e}")
-        return []
+        return None
 
 
 def fetch_emperor_movies(page):
@@ -252,6 +252,8 @@ def fetch_emperor_movies(page):
     try:
         page.goto(EMPEROR_URL, wait_until="commit", timeout=60000)
         now_showing = _extract_emperor_titles(page)
+        if now_showing is None:
+            now_showing = []
 
         coming_soon = []
         coming_soon_btn = page.locator(
@@ -260,14 +262,16 @@ def fetch_emperor_movies(page):
         if coming_soon_btn.count() > 0:
             coming_soon_btn.first.click()
             page.wait_for_timeout(2000)
-            coming_soon = _extract_emperor_titles(page)
+            extracted_soon = _extract_emperor_titles(page)
+            if extracted_soon is not None:
+                coming_soon = extracted_soon
         else:
             print("[Warning] Emperor Cinemas: 'COMING SOON' tab trigger not found.")
 
         return {"now_showing": now_showing, "coming_soon": coming_soon}
     except Exception as e:
         print(f"[Error] Failed scraping Emperor Cinemas: {e}")
-        return {"now_showing": [], "coming_soon": []}
+        return None
 
 
 def fetch_mcl_movies(page, url, prefix="MCL:"):
@@ -293,7 +297,7 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
         return movies
     except Exception as e:
         print(f"[Error] Failed scraping MCL url ({url}): {e}")
-        return []
+        return None
 
 
 def fetch_broadway_now_showing(page):
@@ -342,7 +346,7 @@ def fetch_broadway_now_showing(page):
         return now_showing
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
-        return []
+        return None
 
 
 def fetch_broadway_coming_soon(page):
@@ -375,7 +379,7 @@ def fetch_broadway_coming_soon(page):
         return coming_soon
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
-        return []
+        return None
 
 
 def fetch_all_live_movies():
@@ -399,18 +403,33 @@ def fetch_all_live_movies():
 
         # Emperor
         emperor_data = fetch_emperor_movies(page)
-        now_showing_aggregated.extend(emperor_data.get("now_showing", []))
-        coming_soon_aggregated.extend(emperor_data.get("coming_soon", []))
+        if emperor_data is not None:
+            now_showing_aggregated.extend(emperor_data.get("now_showing", []))
+            coming_soon_aggregated.extend(emperor_data.get("coming_soon", []))
 
         # MCL
-        now_showing_aggregated.extend(fetch_mcl_movies(page, MCL_NOW_SHOWING_URL))
-        coming_soon_aggregated.extend(fetch_mcl_movies(page, MCL_COMING_SOON_URL))
+        mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
+        if mcl_now is not None:
+            now_showing_aggregated.extend(mcl_now)
+
+        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
+        if mcl_soon is not None:
+            coming_soon_aggregated.extend(mcl_soon)
 
         # Broadway
-        now_showing_aggregated.extend(fetch_broadway_now_showing(page))
-        coming_soon_aggregated.extend(fetch_broadway_coming_soon(page))
+        bway_now = fetch_broadway_now_showing(page)
+        if bway_now is not None:
+            now_showing_aggregated.extend(bway_now)
+
+        bway_soon = fetch_broadway_coming_soon(page)
+        if bway_soon is not None:
+            coming_soon_aggregated.extend(bway_soon)
 
         browser.close()
+
+    # Safety Guard: If total scraped list is empty, treat run as failed to prevent state overwrite
+    if not now_showing_aggregated and not coming_soon_aggregated:
+        raise RuntimeError("Scraper returned empty results for all sources. Aborting state update.")
 
     # De-duplicate while preserving insertion order
     now_showing_clean = list(dict.fromkeys(now_showing_aggregated))
@@ -423,44 +442,47 @@ def fetch_all_live_movies():
 
 
 if __name__ == "__main__":
-    live_data = fetch_all_live_movies()
-    seen_data = load_seen_movies()
+    try:
+        live_data = fetch_all_live_movies()
+        seen_data = load_seen_movies()
 
-    current_now_showing = live_data.get("now_showing", [])
-    current_coming_soon = live_data.get("coming_soon", [])
+        current_now_showing = live_data.get("now_showing", [])
+        current_coming_soon = live_data.get("coming_soon", [])
 
-    # Calculate genuine new entries against seen history
-    seen_now_showing = seen_data.get("now_showing", [])
-    seen_coming_soon = seen_data.get("coming_soon", [])
+        # Calculate genuine new entries against seen history
+        seen_now_showing = seen_data.get("now_showing", [])
+        seen_coming_soon = seen_data.get("coming_soon", [])
 
-    new_now_showing = [
-        m for m in current_now_showing if m not in seen_now_showing
-    ]
-    new_coming_soon = [
-        m for m in current_coming_soon if m not in seen_coming_soon
-    ]
+        new_now_showing = [
+            m for m in current_now_showing if m not in seen_now_showing
+        ]
+        new_coming_soon = [
+            m for m in current_coming_soon if m not in seen_coming_soon
+        ]
 
-    print(
-        f"Scraped {len(current_now_showing)} 'Now Showing' and {len(current_coming_soon)} 'Coming Soon' titles."
-    )
-
-    if new_now_showing or new_coming_soon:
         print(
-            f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
+            f"Scraped {len(current_now_showing)} 'Now Showing' and {len(current_coming_soon)} 'Coming Soon' titles."
         )
-        send_discord_notification(new_now_showing, new_coming_soon)
-    else:
-        print("No new movies found since last run.")
 
-    # Merge fresh results into existing history without losing previously seen entries
-    updated_now_showing = list(
-        dict.fromkeys(seen_now_showing + current_now_showing)
-    )
-    updated_coming_soon = list(
-        dict.fromkeys(seen_coming_soon + current_coming_soon)
-    )
+        if new_now_showing or new_coming_soon:
+            print(
+                f"Detected {len(new_now_showing)} new 'Now Showing' and {len(new_coming_soon)} new 'Coming Soon' entries."
+            )
+            send_discord_notification(new_now_showing, new_coming_soon)
+        else:
+            print("No new movies found since last run.")
 
-    save_seen_movies(
-        {"now_showing": updated_now_showing, "coming_soon": updated_coming_soon}
-    )
-    print(f"Updated {SEEN_MOVIES_FILE} successfully.")
+        # Merge fresh results into existing history without losing previously seen entries
+        updated_now_showing = list(
+            dict.fromkeys(seen_now_showing + current_now_showing)
+        )
+        updated_coming_soon = list(
+            dict.fromkeys(seen_coming_soon + current_coming_soon)
+        )
+
+        save_seen_movies(
+            {"now_showing": updated_now_showing, "coming_soon": updated_coming_soon}
+        )
+        print(f"Updated {SEEN_MOVIES_FILE} successfully.")
+    except Exception as e:
+        print(f"[Error] Aborting run without updating {SEEN_MOVIES_FILE}: {e}")
