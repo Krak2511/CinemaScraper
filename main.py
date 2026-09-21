@@ -227,20 +227,24 @@ def send_discord_notification(new_now_showing, new_coming_soon):
 
 def _extract_emperor_titles(page):
     """Internal helper to extract movie titles from Emperor Cinemas page."""
-    page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
-    title_elements = page.query_selector_all(
-        "div.hover-mask div.line-clamp-6.text-ellipsis"
-    )
+    try:
+        page.wait_for_selector(".line-clamp-6", state="attached", timeout=20000)
+        title_elements = page.query_selector_all(
+            "div.hover-mask div.line-clamp-6.text-ellipsis"
+        )
 
-    titles = []
-    for el in title_elements:
-        raw_title = el.inner_text().strip()
-        normalized = _normalize_title(raw_title)
-        if is_movie_title(normalized):
-            formatted_title = f"Emperor Cinemas: {normalized}"
-            if formatted_title not in titles:
-                titles.append(formatted_title)
-    return titles
+        titles = []
+        for el in title_elements:
+            raw_title = el.inner_text().strip()
+            normalized = _normalize_title(raw_title)
+            if is_movie_title(normalized):
+                formatted_title = f"Emperor Cinemas: {normalized}"
+                if formatted_title not in titles:
+                    titles.append(formatted_title)
+        return titles
+    except Exception as e:
+        print(f"[Warning] Failed extracting Emperor titles: {e}")
+        return []
 
 
 def fetch_emperor_movies(page):
@@ -263,7 +267,7 @@ def fetch_emperor_movies(page):
         return {"now_showing": now_showing, "coming_soon": coming_soon}
     except Exception as e:
         print(f"[Error] Failed scraping Emperor Cinemas: {e}")
-        return None  # Return None on scraper failure so JSON isn't overwritten
+        return {"now_showing": [], "coming_soon": []}
 
 
 def fetch_mcl_movies(page, url, prefix="MCL:"):
@@ -289,7 +293,7 @@ def fetch_mcl_movies(page, url, prefix="MCL:"):
         return movies
     except Exception as e:
         print(f"[Error] Failed scraping MCL url ({url}): {e}")
-        return None  # Return None on failure to preserve existing movies in JSON
+        return []
 
 
 def fetch_broadway_now_showing(page):
@@ -338,7 +342,7 @@ def fetch_broadway_now_showing(page):
         return now_showing
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Now Showing: {e}")
-        return None  # Return None on failure
+        return []
 
 
 def fetch_broadway_coming_soon(page):
@@ -371,17 +375,13 @@ def fetch_broadway_coming_soon(page):
         return coming_soon
     except Exception as e:
         print(f"[Error] Failed scraping Broadway Coming Soon: {e}")
-        return None  # Return None on failure
+        return []
 
 
 def fetch_all_live_movies():
-    results = {
-        "emperor": None,
-        "mcl_now": None,
-        "mcl_soon": None,
-        "broadway_now": None,
-        "broadway_soon": None,
-    }
+    """Fetches all movies and aggregates them into standard 'now_showing' and 'coming_soon' keys."""
+    now_showing_aggregated = []
+    coming_soon_aggregated = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -397,40 +397,37 @@ def fetch_all_live_movies():
         )
         page = context.new_page()
 
-        results["emperor"] = fetch_emperor_movies(page)
-        results["mcl_now"] = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
-        results["mcl_soon"] = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
-        results["broadway_now"] = fetch_broadway_now_showing(page)
-        results["broadway_soon"] = fetch_broadway_coming_soon(page)
+        # Emperor
+        emperor_data = fetch_emperor_movies(page)
+        now_showing_aggregated.extend(emperor_data.get("now_showing", []))
+        coming_soon_aggregated.extend(emperor_data.get("coming_soon", []))
+
+        # MCL
+        now_showing_aggregated.extend(fetch_mcl_movies(page, MCL_NOW_SHOWING_URL))
+        coming_soon_aggregated.extend(fetch_mcl_movies(page, MCL_COMING_SOON_URL))
+
+        # Broadway
+        now_showing_aggregated.extend(fetch_broadway_now_showing(page))
+        coming_soon_aggregated.extend(fetch_broadway_coming_soon(page))
 
         browser.close()
 
-    return results
+    # De-duplicate while preserving insertion order
+    now_showing_clean = list(dict.fromkeys(now_showing_aggregated))
+    coming_soon_clean = list(dict.fromkeys(coming_soon_aggregated))
+
+    return {
+        "now_showing": now_showing_clean,
+        "coming_soon": coming_soon_clean,
+    }
 
 
 if __name__ == "__main__":
-    raw_results = fetch_all_live_movies()
+    live_data = fetch_all_live_movies()
     seen_data = load_seen_movies()
 
-    # Collect successfully scraped movies for this run
-    current_now_showing = []
-    current_coming_soon = []
-
-    if raw_results["emperor"]:
-        current_now_showing.extend(raw_results["emperor"]["now_showing"])
-        current_coming_soon.extend(raw_results["emperor"]["coming_soon"])
-
-    if raw_results["mcl_now"] is not None:
-        current_now_showing.extend(raw_results["mcl_now"])
-
-    if raw_results["mcl_soon"] is not None:
-        current_coming_soon.extend(raw_results["mcl_soon"])
-
-    if raw_results["broadway_now"] is not None:
-        current_now_showing.extend(raw_results["broadway_now"])
-
-    if raw_results["broadway_soon"] is not None:
-        current_coming_soon.extend(raw_results["broadway_soon"])
+    current_now_showing = live_data.get("now_showing", [])
+    current_coming_soon = live_data.get("coming_soon", [])
 
     # Calculate genuine new entries against seen history
     seen_now_showing = seen_data.get("now_showing", [])
@@ -455,12 +452,12 @@ if __name__ == "__main__":
     else:
         print("No new movies found since last run.")
 
-    # Merge fresh results into existing history instead of replacing it completely
+    # Merge fresh results into existing history without losing previously seen entries
     updated_now_showing = list(
-        set(seen_now_showing + current_now_showing)
+        dict.fromkeys(seen_now_showing + current_now_showing)
     )
     updated_coming_soon = list(
-        set(seen_coming_soon + current_coming_soon)
+        dict.fromkeys(seen_coming_soon + current_coming_soon)
     )
 
     save_seen_movies(
