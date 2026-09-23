@@ -25,14 +25,12 @@ PROMO_KEYWORDS = [
     r"popcorn",
 ]
 
-# Words to keep lowercase unless they appear at the start or end of a title
 LOWERCASE_WORDS = {
     "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
     "like", "near", "of", "off", "on", "onto", "or", "out", "over", "the",
     "to", "up", "upon", "with",
 }
 
-# Standard tech/cinema terms to preserve uppercase
 PRESERVE_UPPERCASE = {"IMAX", "4DX", "CGS", "3D", "2D", "BTS"}
 
 
@@ -85,7 +83,7 @@ def is_movie_title(text):
     if not text:
         return False
     clean_text = (
-        text.replace("Emperor:", "")
+        text.replace("Emperor Cinemas:", "")
         .replace("MCL:", "")
         .replace("Broadway:", "")
         .strip()
@@ -253,7 +251,7 @@ def fetch_emperor_movies(page):
         page.goto(EMPEROR_URL, wait_until="commit", timeout=60000)
         now_showing = _extract_emperor_titles(page)
         if now_showing is None:
-            now_showing = []
+            return None
 
         coming_soon = []
         coming_soon_btn = page.locator(
@@ -383,9 +381,10 @@ def fetch_broadway_coming_soon(page):
 
 
 def fetch_all_live_movies():
-    """Fetches all movies and aggregates them into standard 'now_showing' and 'coming_soon' keys."""
+    """Fetches all movies per cinema and tracks which cinema chains encountered scraping errors."""
     now_showing_aggregated = []
     coming_soon_aggregated = []
+    failed_cinemas = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -406,30 +405,46 @@ def fetch_all_live_movies():
         if emperor_data is not None:
             now_showing_aggregated.extend(emperor_data.get("now_showing", []))
             coming_soon_aggregated.extend(emperor_data.get("coming_soon", []))
+        else:
+            failed_cinemas.add("Emperor Cinemas:")
 
         # MCL
         mcl_now = fetch_mcl_movies(page, MCL_NOW_SHOWING_URL)
+        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
         if mcl_now is not None:
             now_showing_aggregated.extend(mcl_now)
+        else:
+            failed_cinemas.add("MCL:")
 
-        mcl_soon = fetch_mcl_movies(page, MCL_COMING_SOON_URL)
         if mcl_soon is not None:
             coming_soon_aggregated.extend(mcl_soon)
+        else:
+            failed_cinemas.add("MCL:")
 
         # Broadway
         bway_now = fetch_broadway_now_showing(page)
+        bway_soon = fetch_broadway_coming_soon(page)
         if bway_now is not None:
             now_showing_aggregated.extend(bway_now)
+        else:
+            failed_cinemas.add("Broadway:")
 
-        bway_soon = fetch_broadway_coming_soon(page)
         if bway_soon is not None:
             coming_soon_aggregated.extend(bway_soon)
+        else:
+            failed_cinemas.add("Broadway:")
 
         browser.close()
 
-    # Safety Guard: If total scraped list is empty, treat run as failed to prevent state overwrite
-    if not now_showing_aggregated and not coming_soon_aggregated:
-        raise RuntimeError("Scraper returned empty results for all sources. Aborting state update.")
+    # Safety Guard: If total scraped list is empty, treat run as failed to prevent state update
+    if (
+        not now_showing_aggregated
+        and not coming_soon_aggregated
+        and len(failed_cinemas) == 3
+    ):
+        raise RuntimeError(
+            "Scraper returned empty results for all sources. Aborting state update."
+        )
 
     # De-duplicate while preserving insertion order
     now_showing_clean = list(dict.fromkeys(now_showing_aggregated))
@@ -438,6 +453,7 @@ def fetch_all_live_movies():
     return {
         "now_showing": now_showing_clean,
         "coming_soon": coming_soon_clean,
+        "failed_cinemas": list(failed_cinemas),
     }
 
 
@@ -448,16 +464,26 @@ if __name__ == "__main__":
 
         current_now_showing = live_data.get("now_showing", [])
         current_coming_soon = live_data.get("coming_soon", [])
+        failed_cinemas = live_data.get("failed_cinemas", [])
 
-        # Calculate genuine new entries against seen history
+        if failed_cinemas:
+            print(f"[Warning] Scrape errors encountered for: {', '.join(failed_cinemas)}")
+
         seen_now_showing = seen_data.get("now_showing", [])
         seen_coming_soon = seen_data.get("coming_soon", [])
 
+        # Ignore movies from failed cinemas during "new movie" detection to avoid false alerts
         new_now_showing = [
-            m for m in current_now_showing if m not in seen_now_showing
+            m
+            for m in current_now_showing
+            if m not in seen_now_showing
+            and not any(m.startswith(prefix) for prefix in failed_cinemas)
         ]
         new_coming_soon = [
-            m for m in current_coming_soon if m not in seen_coming_soon
+            m
+            for m in current_coming_soon
+            if m not in seen_coming_soon
+            and not any(m.startswith(prefix) for prefix in failed_cinemas)
         ]
 
         print(
@@ -472,7 +498,7 @@ if __name__ == "__main__":
         else:
             print("No new movies found since last run.")
 
-        # Merge fresh results into existing history without losing previously seen entries
+        # Preserve previously seen movies in history even if the cinema failed on this run
         updated_now_showing = list(
             dict.fromkeys(seen_now_showing + current_now_showing)
         )
@@ -481,7 +507,10 @@ if __name__ == "__main__":
         )
 
         save_seen_movies(
-            {"now_showing": updated_now_showing, "coming_soon": updated_coming_soon}
+            {
+                "now_showing": updated_now_showing,
+                "coming_soon": updated_coming_soon,
+            }
         )
         print(f"Updated {SEEN_MOVIES_FILE} successfully.")
     except Exception as e:
