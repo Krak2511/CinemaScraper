@@ -14,6 +14,7 @@ image = (
 app = modal.App("cinema-scraper")
 volume = modal.Volume.from_name("scraper-state-volume", create_if_missing=True)
 
+
 @app.function(
     image=image,
     # Persists seen_movies.json inside Modal cloud storage
@@ -25,10 +26,9 @@ volume = modal.Volume.from_name("scraper-state-volume", create_if_missing=True)
             "DISCORD_WEBHOOK_URL": os.environ.get("DISCORD_WEBHOOK_URL", "")
         })
     ],
-    timeout=300
+    timeout=300,
 )
 def run_scraper():
-    import json
     import main
 
     print("🚀 Triggering cinema scraper on Modal...")
@@ -36,18 +36,55 @@ def run_scraper():
     # Point state tracking file to the persistent volume path
     main.SEEN_MOVIES_FILE = "/root/data/seen_movies.json"
 
-    current_data = main.fetch_all_live_movies()
+    # Reload persistent volume to ensure latest file state
+    volume.reload()
+
+    live_cinemas = main.fetch_all_live_movies()
     seen_data = main.load_seen_movies()
 
-    new_now_showing = [
-        m for m in current_data["now_showing"] if m not in seen_data["now_showing"]
-    ]
-    new_coming_soon = [
-        m for m in current_data["coming_soon"] if m not in seen_data["coming_soon"]
-    ]
+    new_now_showing = []
+    new_coming_soon = []
+    updated_seen = {
+        "now_showing": {},
+        "coming_soon": {},
+    }
+
+    total_scraped_now = 0
+    total_scraped_soon = 0
+
+    for cinema_key in ["Emperor:", "MCL:", "Broadway:"]:
+        for cat in ["now_showing", "coming_soon"]:
+            scraped_list = live_cinemas[cinema_key][cat]
+            previous_history = seen_data[cat].get(cinema_key, [])
+
+            if scraped_list is None:
+                # Scrape failed (e.g. MCL timeout): preserve history completely
+                print(
+                    f"[Warning] Preserving history for {cinema_key} ({cat}) due to scrape error."
+                )
+                updated_seen[cat][cinema_key] = previous_history
+            else:
+                if cat == "now_showing":
+                    total_scraped_now += len(scraped_list)
+                else:
+                    total_scraped_soon += len(scraped_list)
+
+                # Identify new entries not in history
+                fresh_entries = [
+                    m for m in scraped_list if m not in previous_history
+                ]
+                if cat == "now_showing":
+                    new_now_showing.extend(fresh_entries)
+                else:
+                    new_coming_soon.extend(fresh_entries)
+
+                # Union previous history + new scraped list
+                updated_seen[cat][cinema_key] = list(
+                    dict.fromkeys(previous_history + scraped_list)
+                )
 
     print(
-        f"Scraped {len(current_data['now_showing'])} 'Now Showing' and {len(current_data['coming_soon'])} 'Coming Soon' titles."
+        f"Scraped {total_scraped_now} 'Now Showing' and {total_scraped_soon} 'Coming Soon' titles across active cinemas."
     )
 
     if new_now_showing or new_coming_soon:
@@ -58,7 +95,7 @@ def run_scraper():
     else:
         print("No new movies found.")
 
-    main.save_seen_movies(current_data)
-    # Commit changes to Modal persistent storage
+    # Save structured history and commit volume changes
+    main.save_seen_movies(updated_seen)
     volume.commit()
     print("Execution complete.")
