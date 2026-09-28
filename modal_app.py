@@ -20,7 +20,7 @@ volume = modal.Volume.from_name("scraper-state-volume", create_if_missing=True)
     # Persists seen_movies.json inside Modal cloud storage
     volumes={"/root/data": volume},
     # Triggers every 30 minutes with zero delays
-    schedule=modal.Cron("*/30 * * * *"),
+    schedule=modal.Cron("5,35 * * * *"),
     secrets=[
         modal.Secret.from_dict({
             "DISCORD_WEBHOOK_URL": os.environ.get("DISCORD_WEBHOOK_URL", "")
